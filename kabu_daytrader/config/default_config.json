@@ -1,0 +1,37 @@
+{
+  "watchlist_size": 30,
+  "shares_per_symbol": 100,
+  "trailing_multiplier": 2.0,
+  "reentry_cooldown_bars": 3,
+  "bar_interval_minutes": 3,
+  "pg_config_path": "C:\\Users\\kaneda\\ClaudeCode\\minute_data_import\\config.ini",
+  "daily_profit_target": 20000,
+  "daily_max_loss": 20000,
+  "force_close_time": "15:00",
+  "entry_start_time": "09:12",
+  "push_reconnect_max_retry": 3,
+  "indicators": {
+    "sma_short": {"type": "sma", "period": 5},
+    "sma_long": {"type": "sma", "period": 25},
+    "rsi14": {"type": "rsi", "period": 14},
+    "bb": {"type": "bollinger", "period": 20, "num_std": 2},
+    "vwap": {"type": "vwap"},
+    "ar": {"type": "opening_range_ar", "bar_count": 4}
+  },
+  "entry_rule": {
+    "operator": "AND",
+    "conditions": [
+      {"indicator": "rsi14", "field": "rsi14", "op": "<", "value": 30},
+      {"indicator": "vwap", "field": "deviation_pct", "op": "<", "value": -1.0},
+      {"indicator": "bb", "field": "bbw", "op": ">", "value": 0.01},
+      {"indicator": "bb", "field": "bbw", "op": "<=", "value": 0.018}
+    ]
+  },
+  "exit_rule": {
+    "operator": "OR",
+    "conditions": [
+      {"indicator": "bb", "field": "position", "op": "==", "value": "ABOVE_UPPER"},
+      {"indicator": "rsi14", "field": "rsi14", "op": ">", "value": 70}
+    ]
+  }
+}

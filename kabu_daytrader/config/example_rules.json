@@ -1,0 +1,24 @@
+{
+  "indicators": {
+    "sma_short": {"type": "sma", "period": 5},
+    "sma_long": {"type": "sma", "period": 25},
+    "rsi14": {"type": "rsi", "period": 14},
+    "bb": {"type": "bollinger", "period": 20, "num_std": 2},
+    "vwap": {"type": "vwap"}
+  },
+  "entry_rule": {
+    "operator": "AND",
+    "conditions": [
+      {"indicator": "rsi14", "field": "rsi14", "op": "<", "value": 30},
+      {"indicator": "vwap", "field": "deviation_pct", "op": "<", "value": -1.0},
+      {"indicator": "sma_short", "field": "sma5", "op": ">", "value": "sma_long.sma25"}
+    ]
+  },
+  "exit_rule": {
+    "operator": "OR",
+    "conditions": [
+      {"indicator": "bb", "field": "position", "op": "==", "value": "ABOVE_UPPER"},
+      {"indicator": "rsi14", "field": "rsi14", "op": ">", "value": 70}
+    ]
+  }
+}
