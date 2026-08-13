@@ -1,24 +1,32 @@
 {
   "indicators": {
-    "sma_short": {"type": "sma", "period": 5},
-    "sma_long": {"type": "sma", "period": 25},
-    "rsi14": {"type": "rsi", "period": 14},
-    "bb": {"type": "bollinger", "period": 20, "num_std": 2},
-    "vwap": {"type": "vwap"}
+    "rsi6": {"type": "rsi", "period": 6},
+    "macd": {"type": "macd", "fast_period": 7, "slow_period": 26, "signal_period": 7},
+    "dmi": {"type": "dmi", "di_period": 6, "adx_period": 14}
   },
   "entry_rule": {
     "operator": "AND",
     "conditions": [
-      {"indicator": "rsi14", "field": "rsi14", "op": "<", "value": 30},
-      {"indicator": "vwap", "field": "deviation_pct", "op": "<", "value": -1.0},
-      {"indicator": "sma_short", "field": "sma5", "op": ">", "value": "sma_long.sma25"}
+      {"indicator": "rsi6", "field": "rsi6", "op": "<", "value": 35},
+      {"indicator": "macd", "field": "macd", "op": "<", "value": 0},
+      {"indicator": "macd", "field": "dea", "op": "<", "value": -10},
+      {"indicator": "dmi", "field": "adx", "op": ">", "value": 50},
+      {"indicator": "dmi", "field": "pdi", "op": "<", "value": "dmi.mdi"}
     ]
   },
   "exit_rule": {
-    "operator": "OR",
+    "operator": "AND",
     "conditions": [
-      {"indicator": "bb", "field": "position", "op": "==", "value": "ABOVE_UPPER"},
-      {"indicator": "rsi14", "field": "rsi14", "op": ">", "value": 70}
+      {"indicator": "rsi6", "field": "rsi6", "op": "<", "value": 65},
+      {
+        "operator": "OR",
+        "conditions": [
+          {"indicator": "macd", "field": "macd_crossed_up", "op": "==", "value": true},
+          {"indicator": "macd", "field": "dif_crossed_dea_up", "op": "==", "value": true}
+        ]
+      },
+      {"indicator": "dmi", "field": "adx", "op": ">", "value": 50},
+      {"indicator": "dmi", "field": "pdi", "op": "<", "value": "dmi.mdi"}
     ]
   }
 }

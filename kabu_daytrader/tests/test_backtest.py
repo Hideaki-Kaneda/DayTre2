@@ -125,44 +125,14 @@ def test_backtest_engine_respects_buying_power_and_rank_order():
 
 
 def test_backtest_engine_trailing_stop_triggers():
-    from datetime import datetime, timedelta
-
-    config = BacktestConfig(
-        indicator_config={
-            "rsi3": {"type": "rsi", "period": 3},
-            "ar": {"type": "opening_range_ar", "bar_count": 2},
-        },
-        entry_rule={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": "<", "value": 50}]},
-        exit_rule={"operator": "AND", "conditions": []},  # 決済はトレールのみに任せる
-        daily_profit_target=1_000_000,
-        daily_max_loss=1_000_000,
-        force_close_time=time(23, 59),
-        trailing_multiplier=2.0,
-    )
-    engine = BacktestEngine(config)
-
-    base_dt = datetime(2026, 7, 28, 9, 0)
-    # 1,2本目：AR算出用（高値-安値=4のバーを2本 → AR=4、トレール幅=4*2=8）
-    # 3,4本目：下落させてRSIを下げエントリー
-    # 5本目：急騰させ最高値を更新（110）
-    # 6本目：110から8を超えて下落（100）→ トレール決済が発動するはず
-    ohlcv = [
-        (100, 102, 98, 100),   # bar1
-        (100, 101, 97, 99),    # bar2
-        (99, 99, 95, 95),      # bar3
-        (95, 95, 88, 90),      # bar4（この時点でエントリー成立想定）
-        (90, 112, 90, 110),    # bar5（急騰、最高値110）
-        (110, 110, 98, 100),   # bar6（急落、トレール決済発動）
-    ]
-    bars = [
-        Bar("9432", base_dt + timedelta(minutes=i), o, h, l, c, 1000)
-        for i, (o, h, l, c) in enumerate(ohlcv)
-    ]
-
-    result = engine.run(bars)
-    assert result.trade_count >= 1
-    assert any(t.reason == OrderReason.TRAILING_STOP for t in result.trades)
-    print("test_backtest_engine_trailing_stop_triggers: OK", result.total_pnl, result.trades)
+    """
+    【2026-08時点で廃止】AR（opening_range_ar）指標はユーザー指示により削除された。
+    AR×倍率のトレール決済機能自体（RiskManager.trailing_multiplier等）はコードとしては
+    残っているが、AR指標が無いためar_indicator_keyが常にNoneとなり実質的に無効化されている。
+    新しい損切ロジック（固定値ラチェット式ストップ）に置き換わる予定のため、
+    このテストは後方互換のためスタブとして残す。
+    """
+    print("test_backtest_engine_trailing_stop_triggers: SKIPPED (AR指標削除済み、トレール決済は実質無効化)")
 
 
 def test_backtest_engine_closes_open_position_at_end():
@@ -190,56 +160,53 @@ def test_backtest_engine_closes_open_position_at_end():
 
 
 def test_backtest_engine_daily_max_loss_halts_and_resets_next_day():
+    """
+    【2026-08時点で簡略化】従来はAR×トレール決済で実現損失を発生させていたが、
+    AR指標が削除されたため、シグナル決済（exit_rule）で意図的に含み損を確定させる
+    形に作り直した。日次上限到達後、翌日には正しくリセットされることを確認する。
+    """
     from datetime import datetime, timedelta
 
     config = BacktestConfig(
-        indicator_config={
-            "rsi2": {"type": "rsi", "period": 2},
-            "ar": {"type": "opening_range_ar", "bar_count": 2},
-        },
+        indicator_config={"rsi2": {"type": "rsi", "period": 2}},
         entry_rule={"operator": "AND", "conditions": [{"indicator": "rsi2", "field": "rsi2", "op": "<", "value": 50}]},
-        exit_rule={"operator": "AND", "conditions": []},
+        exit_rule={"operator": "AND", "conditions": [{"indicator": "rsi2", "field": "rsi2", "op": ">", "value": 60}]},
         daily_max_loss=100,  # 小さくしてすぐ到達させる
         daily_profit_target=1_000_000,
         force_close_time=time(23, 59),
         shares_per_symbol=10,
-        trailing_multiplier=2.0,
     )
     engine = BacktestEngine(config)
 
     day1 = datetime(2026, 7, 28, 9, 0)
     day2 = datetime(2026, 7, 29, 9, 0)
-    # 1日目：最初の2本でAR算出（TR=4×2本→AR=4、トレール幅=8）、
-    # その後下落してエントリー、さらに下落してトレール決済（実現損失）→ 日次最大損失(100円)に到達
+    # 1日目：緩やかに下落してエントリー(98)、急落してから一部反発(93)したところで
+    # RSI2が60を超えて決済（93<98なので実現損失-50/株、10株で-500円）→ 日次最大損失(100円)に到達
     ohlcv_day1 = [
-        (100, 102, 98, 100),
-        (100, 101, 97, 99),
-        (99, 99, 95, 95),
-        (95, 95, 88, 90),
-        (90, 90, 78, 80),
+        (100, 100, 99, 100),
+        (100, 100, 98, 99),
+        (99, 99, 97, 98),   # エントリー成立（RSI2が初めて50未満）
+        (98, 98, 96, 97),
+        (97, 97, 95, 96),
+        (96, 96, 79, 80),
+        (80, 94, 80, 93),   # RSI2が60を超えて決済（93<98なので損失）
     ]
     bars_day1 = [
         Bar("9432", day1 + timedelta(minutes=i), o, h, l, c, 1000)
         for i, (o, h, l, c) in enumerate(ohlcv_day1)
     ]
-    # 2日目：新しい日なので改めてエントリーできることを確認（AR算出用2本＋下落）
-    ohlcv_day2 = [
-        (100, 102, 98, 100),
-        (100, 101, 97, 99),
-        (99, 99, 95, 95),
-        (95, 95, 90, 92),
-    ]
+    # 2日目：新しい日なので改めてエントリーできることを確認（同じ価格パターンを再利用）
     bars_day2 = [
         Bar("9432", day2 + timedelta(minutes=i), o, h, l, c, 1000)
-        for i, (o, h, l, c) in enumerate(ohlcv_day2)
+        for i, (o, h, l, c) in enumerate(ohlcv_day1)
     ]
 
     result = engine.run(bars_day1 + bars_day2)
-    # 2日分でそれぞれ最低1回は取引が発生しているはず（日をまたいで停止が続いていない）
     trade_dates = {t.entry_at.date() for t in result.trades}
     assert day1.date() in trade_dates
     assert day2.date() in trade_dates, "日次上限は翌日には引き継がれずリセットされるはず"
-    print("test_backtest_engine_daily_max_loss_halts_and_resets_next_day: OK", trade_dates)
+    assert any(t.realized_pnl < 0 for t in result.trades), "1日目に実現損失が発生しているはず"
+    print("test_backtest_engine_daily_max_loss_halts_and_resets_next_day: OK", trade_dates, [t.realized_pnl for t in result.trades])
 
 
 def test_resample_bars_aggregates_ohlcv_correctly():
@@ -318,32 +285,29 @@ def test_backtest_engine_works_with_resampled_bars():
     print("test_backtest_engine_works_with_resampled_bars: OK", result.trade_count)
 
 
-def test_backtest_engine_log_entries_capture_entry_and_trailing_stop():
+def test_backtest_engine_log_entries_capture_entry_and_exit():
+    """
+    【2026-08時点で作り直し】従来はAR×トレール決済のログ記録を検証していたが、
+    AR指標が削除されたため、シグナル決済（exit_rule）でのログ記録を検証する形に変更した。
+    """
     config = BacktestConfig(
-        indicator_config={
-            "rsi3": {"type": "rsi", "period": 3},
-            "ar": {"type": "opening_range_ar", "bar_count": 2},
-        },
+        indicator_config={"rsi3": {"type": "rsi", "period": 3}},
         entry_rule={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": "<", "value": 50}]},
-        exit_rule={"operator": "AND", "conditions": []},
+        exit_rule={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": ">", "value": 60}]},
         daily_profit_target=1_000_000,
         daily_max_loss=1_000_000,
         force_close_time=time(23, 59),
-        trailing_multiplier=2.0,
     )
     engine = BacktestEngine(config)
 
     base_dt = datetime(2026, 7, 28, 9, 0)
-    # 1,2本目：AR算出（TR=4×2本→AR=4、トレール幅=8）
-    # 3,4本目：下落してエントリー成立
-    # 5本目：急騰して最高値更新 → 6本目：急落してトレール決済発動
+    # 下落してエントリー成立 → 反発してシグナル決済成立、という一連の流れを記録させる
     ohlcv = [
-        (100, 102, 98, 100),
-        (100, 101, 97, 99),
-        (99, 99, 95, 95),
-        (95, 95, 88, 90),
-        (90, 112, 90, 110),
-        (110, 110, 98, 100),
+        (100, 100, 99, 100),
+        (100, 100, 98, 99),
+        (99, 99, 97, 98),
+        (98, 98, 90, 92),   # エントリー成立（RSI3=0）
+        (92, 105, 92, 104),  # 反発してRSI3>60→決済
     ]
     bars = [Bar("9432", base_dt + timedelta(minutes=i), o, h, l, c, 1000) for i, (o, h, l, c) in enumerate(ohlcv)]
 
@@ -351,16 +315,16 @@ def test_backtest_engine_log_entries_capture_entry_and_trailing_stop():
 
     entry_logs = [e for e in result.log_entries if e.event_type == "ENTRY"]
     exit_logs = [e for e in result.log_entries if e.event_type == "EXIT"]
-    trailing_logs = [e for e in exit_logs if e.reason == "TRAILING_STOP"]
 
     assert len(entry_logs) >= 1
     assert all(e.symbol == "9432" and e.reason == "SIGNAL" and e.realized_pnl is None for e in entry_logs)
-    assert len(trailing_logs) >= 1
+    assert len(exit_logs) >= 1
+    assert all(e.reason == "SIGNAL" and e.realized_pnl is not None for e in exit_logs)
 
     # ログは時系列順（最初がエントリー、最後が決済）になっているはず
     assert result.log_entries[0].event_type == "ENTRY"
     assert result.log_entries[-1].event_type == "EXIT"
-    print("test_backtest_engine_log_entries_capture_entry_and_trailing_stop: OK", len(entry_logs), len(trailing_logs))
+    print("test_backtest_engine_log_entries_capture_entry_and_exit: OK", len(entry_logs), len(exit_logs))
 
 
 def test_write_backtest_log_csv_outputs_readable_file():
@@ -449,7 +413,7 @@ if __name__ == "__main__":
     test_resample_bars_interval_1_returns_unchanged()
     test_resample_bars_handles_multiple_symbols_independently()
     test_backtest_engine_works_with_resampled_bars()
-    test_backtest_engine_log_entries_capture_entry_and_trailing_stop()
+    test_backtest_engine_log_entries_capture_entry_and_exit()
     test_write_backtest_log_csv_outputs_readable_file()
     test_backtest_engine_reentry_cooldown_blocks_immediate_reentry()
     test_backtest_engine_reentry_cooldown_disabled_allows_immediate_reentry()

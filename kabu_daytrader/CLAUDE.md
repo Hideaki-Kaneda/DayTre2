@@ -238,6 +238,36 @@ kabu_daytrader/
 
 **【解釈に関する確認事項・要フォローアップ】**：ユーザーからの当初の指示は売り側を「（安値－終値）＜（始値－終値）」としていたが、安値は定義上終値以下（`low <= close`）になるため`(low - close)`は常に0以下となり、この式では条件が常に真になってしまう（実質的にフィルタとして機能しない）。買い側の条件と対称になるよう「（終値－安値）＜（始値－終値）」（＝下ヒゲ＜実体）と解釈して実装し、その旨をユーザーに伝えた。**ユーザーからの明示的な確認はまだ得られていない**ため、次にこの話題が出た際は解釈が正しかったか改めて確認すること。もし意図と異なる場合は`CandleStrategyEngine.evaluate_entry()`内の該当箇所を修正する。
 
+## 指標セットの全面刷新（2026-08、進行中）
+
+ユーザー指示により、最初の戦略（`trading`/`signals`パッケージ）の指標を全面的に入れ替える作業を開始した。**この作業はまだ完了しておらず、段階的に進めている**。
+
+**確定仕様**（ユーザー確認済み）：
+- 5分足、RSI(6)、MACD(7,26,7)、DMI(DI期間6, ADX期間14)を使用
+- 新規買い：RSI<35 AND MACD<0 AND DEA<-10 AND ADX>50 AND PDI<MDI
+- 新規売り：RSI>65 AND MACD>0 AND DEA>10 AND ADX<50 AND MDI<PDI（**信用取引での空売り**）
+- 利確買い：RSI<65 AND (MACDがマイナス→プラスに反転 OR DIFがDEAを上抜く) AND ADX>50 AND PDI<MDI
+- 利確売り：RSI>35 AND (MACDがプラス→マイナスに反転 OR DIFがDEAを下抜く) AND ADX>50 AND PDI>MDI
+- 損切（新方式・固定値ラチェット式、45円/20円は設定項目）：
+  - 買い：初期損切値=購入価格-45円。現在値が(損切値+45)+20円を上回ったら損切値=現在値-45円に更新。現在値が損切値を下回ったら損切
+  - 売り：初期損切値=購入価格+45円。現在値が(損切値-45)-20円を下回ったら損切値=現在値+45円に更新。現在値が損切値を上回ったら損切
+- 強制引け：15:00（設定項目、既存のforce_close_timeを流用可）
+- 用語：MACD=ヒストグラム(DIF-DEA)、DIF=EMA(fast)-EMA(slow)、DEA=EMA(DIF, signal)。DEAとMACDは書き分けられている（ユーザー確認済み）
+
+**この時点で実装完了した部分**：
+- `indicators/macd.py`（新規）：DIF/DEA/MACD（ヒストグラム）を算出。`macd_crossed_up/down`（ヒストグラムのゼロクロス）・`dif_crossed_dea_up/down`（DIFとDEAのクロス）を`value()`に含め、利確条件の「反転」「上抜く/下抜く」判定に使えるようにした
+- `indicators/dmi.py`（新規）：+DI（`pdi`）・-DI（`mdi`）・ADXをWilderの標準的な平滑化方式で算出
+- **`indicators/moving_average.py`（SMA/EMA）・`bollinger_band.py`（ボリンジャーバンド）・`vwap.py`（VWAP）・`opening_range_ar.py`（AR）を削除**（ユーザー指示「古いインジケータは削除してください」）。`indicators/registry.py`・`indicators/__init__.py`を新指標セット（rsi/macd/dmi）のみに更新
+- `config/default_config.json`・`config/example_rules.json`を新指標セットに更新。**ただし現時点ではentry_rule/exit_ruleは買い側（新規買い・利確買い）のみを設定している**（`SignalEngine`が現状entry_rule/exit_ruleを1つずつしか持てない設計のため）
+- 関連する既存テスト（`test_indicators.py`は全面書き換え、`test_signal_engine.py`・`test_backtest.py`・`test_trading_controller.py`の旧指標参照箇所を新指標ベースに置き換え）。全テストパス
+
+**未実装・次のステップ**：
+1. **売り（空売り）側のentry_rule/exit_ruleが未実装**：`SignalEngine`は現状entry_rule/exit_ruleを1組しか持てない設計のため、買い/売りそれぞれ独立したルール（entry_rule_long/entry_rule_short/exit_rule_long/exit_rule_short）を持てるよう拡張が必要
+2. **信用取引（買い・売りとも）への対応が未実装**：`trading.Position`は方向（LONG/SHORT）を持たない設計。`api.RestClient`にも信用新規売り・信用返済買い等のメソッドが無い（`candle_strategy`パッケージには信用取引対応のブローカーインターフェースを実装済みだが、そちらは別戦略用に完全に独立させているため、この第一戦略にはまだ流用していない）
+3. **新しい損切ロジック（固定値ラチケット式ストップ）が未実装**：既存の`RiskManager.trailing_multiplier`（AR×倍率のトレール決済）はAR指標の削除により実質無効化された状態のまま。新しい固定値（45円/20円、設定項目）でのラチェット式ストップロスに置き換える実装がまだ
+4. **足の間隔を5分に変更する設定はdefault_config.jsonの`bar_interval_minutes`のみ更新済み**。GUI側の動作確認・実機での5分足運用確認はまだ
+5. 上記1〜3が未完了のため、**現状のentry_rule/exit_ruleは「新規買い・利確買い」の条件のみが動作する状態**（新規売りは発火しない設定になっている）。実運用前に必ず2〜3の実装完了を待つこと
+
 ## コーディング規約
 
 - 設定値・閾値（損切97%、日次上限2万円等）は必ず設定ファイル経由にし、コード中に定数として埋め込まない

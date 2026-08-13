@@ -78,12 +78,17 @@ def test_controller_tick_triggers_entry_and_emits_signals():
     print("test_controller_tick_triggers_entry_and_emits_signals: OK", len(received_orders))
 
 
-def test_controller_trailing_stop_triggers_exit():
+def test_controller_signal_exit_after_entry():
+    """
+    【2026-08時点で作り直し】従来はAR×トレール決済を検証していたが、
+    AR指標が削除されたため、RSIベースのシグナル決済（exit_rule）で
+    エントリー→決済の一連の流れを検証する形に変更した。
+    """
     broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
     settings = _make_settings(
-        indicators={"rsi3": {"type": "rsi", "period": 3}, "ar": {"type": "opening_range_ar", "bar_count": 2}},
-        exit_rule={"operator": "AND", "conditions": []},  # 決済はトレールのみに任せる
-        trailing_multiplier=2.0,
+        indicators={"rsi3": {"type": "rsi", "period": 3}},
+        entry_rule={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": "<", "value": 50}]},
+        exit_rule={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": ">", "value": 60}]},
     )
     controller = TradingController(broker=broker, settings=settings, watchlist=[WatchlistEntry(symbol="9432", name="NTT")])
     controller.risk_manager.start_new_trading_day(datetime(2026, 7, 28).date())
@@ -92,9 +97,8 @@ def test_controller_trailing_stop_triggers_exit():
     controller.order_event.connect(lambda r: received_orders.append(r))
 
     base_dt = datetime(2026, 7, 28, 9, 0)
-    # 0,1本目：AR算出用の下地。2,3本目：下落でRSIを下げエントリー成立。
-    # 4本目：急騰し最高値を更新。5本目：急落しトレール決済が発動するはず。
-    prices = [100, 99, 98, 95, 90, 110, 100, 90]
+    # 下落してエントリー成立 → 反発してシグナル決済成立
+    prices = [100, 99, 98, 92, 104, 105]
     for i, p in enumerate(prices):
         broker.set_current_price("9432", float(p))
         controller._on_tick(PriceTick(symbol="9432", timestamp=base_dt + timedelta(minutes=i), price=float(p), volume=1000))
@@ -102,8 +106,9 @@ def test_controller_trailing_stop_triggers_exit():
 
     assert controller.position_manager.has_position("9432") is False
     from trading import OrderReason
-    assert any(r.reason == OrderReason.TRAILING_STOP for r in received_orders)
-    print("test_controller_trailing_stop_triggers_exit: OK")
+    assert any(r.reason == OrderReason.SIGNAL for r in received_orders)
+    assert len(received_orders) == 2  # エントリー1件・決済1件
+    print("test_controller_signal_exit_after_entry: OK")
 
 
 def test_controller_check_forced_liquidation_closes_all_positions():
@@ -311,7 +316,6 @@ def test_controller_start_warms_up_indicators_from_watchlist_entry_summary():
     settings = _make_settings(**{
         "indicators": {
             "rsi3": {"type": "rsi", "period": 3},
-            "bb": {"type": "bollinger", "period": 4, "num_std": 2},
         },
         "entry_rule": {"operator": "AND", "conditions": []},
         "exit_rule": {"operator": "AND", "conditions": []},
@@ -323,7 +327,6 @@ def test_controller_start_warms_up_indicators_from_watchlist_entry_summary():
     assert ctx.all_ready() is True
     snap = ctx.snapshot()
     assert abs(snap["rsi3"]["rsi3"] - 42.0) < 0.01, snap
-    assert abs(snap["bb"]["middle"] - 1000.0) < 0.01, snap
 
     # 要約値の無い7203はウォームアップされず、is_ready()はFalseのまま
     ctx2 = controller.signal_engine.get_context("7203")
@@ -535,11 +538,11 @@ def test_controller_start_warms_up_from_db_when_available():
 
         broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
         settings = _make_settings(
-            indicators={"sma3": {"type": "sma", "period": 3}},
+            indicators={"rsi3": {"type": "rsi", "period": 3}},
             bar_interval_minutes=1,
         )
         # CSV要約値は実データと全く異なる値にしておき、上書きされていないことを確認する
-        watchlist = [WatchlistEntry(symbol="9432", name="NTT", prev_close=99999.0)]
+        watchlist = [WatchlistEntry(symbol="9432", name="NTT", prev_close=99999.0, prev_rsi=1.0)]
         controller = TradingController(broker=broker, settings=settings, watchlist=watchlist, pg_config_path=config_path)
 
         with patch("storage.pg_load_bars", return_value=fake_bars) as mock_load:
@@ -548,15 +551,15 @@ def test_controller_start_warms_up_from_db_when_available():
             assert mock_load.call_args.kwargs["codes"] == ["9432"]
 
         snap = controller.signal_engine.get_context("9432").snapshot()
-        # 実データ由来の値（直近3本の単純平均）になっているはず。CSVの99999は使われていない
-        assert snap["sma3"]["sma3"] == (1017 + 1018 + 1019) / 3
+        # 実データ（一貫した上昇トレンド）由来の値になっているはず。CSVのprev_rsi=1.0は使われていない
+        assert snap["rsi3"]["rsi3"] > 50.0
     print("test_controller_start_warms_up_from_db_when_available: OK", snap)
 
 
 if __name__ == "__main__":
     test_controller_constructs_without_ws_url()
     test_controller_tick_triggers_entry_and_emits_signals()
-    test_controller_trailing_stop_triggers_exit()
+    test_controller_signal_exit_after_entry()
     test_controller_check_forced_liquidation_closes_all_positions()
     test_controller_persists_to_db_when_db_path_given()
     test_controller_db_access_from_different_thread_does_not_raise()

@@ -14,39 +14,23 @@ SignalEngineや他のモジュールは、この registry.py 経由でのみ
 from typing import Any, Dict, Type
 
 from .base import Indicator
-from .bollinger_band import BollingerBandIndicator
-from .moving_average import MovingAverageIndicator
-from .opening_range_ar import OpeningRangeARIndicator
+from .dmi import DMIIndicator
+from .macd import MACDIndicator
 from .rsi import RSIIndicator
-from .vwap import VWAPIndicator
 
 INDICATOR_REGISTRY: Dict[str, Type[Indicator]] = {
-    "sma": MovingAverageIndicator,
-    "ema": MovingAverageIndicator,  # type=ema をparamsで指定して使う
     "rsi": RSIIndicator,
-    "bollinger": BollingerBandIndicator,
-    "vwap": VWAPIndicator,
-    "opening_range_ar": OpeningRangeARIndicator,
+    "macd": MACDIndicator,
+    "dmi": DMIIndicator,
     # 新規指標はここに追記するだけでSignalEngine側の変更は不要
 }
 
 
 def create_indicator(name: str, params: Dict[str, Any] | None = None) -> Indicator:
-    """
-    レジストリからインジケータ名でインスタンスを生成する。
-
-    "ema" を指定した場合は MovingAverageIndicator に type="ema" を
-    自動的にマージして渡す（設定ファイルの記述を簡潔にするため）。
-    """
+    """レジストリからインジケータ名でインスタンスを生成する。"""
     cls = INDICATOR_REGISTRY.get(name)
     if cls is None:
         available = ", ".join(sorted(INDICATOR_REGISTRY.keys()))
         raise ValueError(f"未登録の指標です: '{name}'（登録済み: {available}）")
 
-    params = dict(params or {})
-    if name == "ema":
-        params.setdefault("type", "ema")
-    elif name == "sma":
-        params.setdefault("type", "sma")
-
-    return cls(params)
+    return cls(dict(params or {}))
