@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from indicators import PriceTick  # noqa: E402
+from backtest.models import Bar  # noqa: E402
 from signals import RuleGroup, SignalEngine  # noqa: E402
 from signals.rule_config import RuleCondition  # noqa: E402
 
@@ -261,6 +262,87 @@ def test_warmup_symbol_from_summary_falls_back_when_missing_data():
     print("test_warmup_symbol_from_summary_falls_back_when_missing_data: OK")
 
 
+def test_warmup_symbol_from_bars_uses_real_data_and_becomes_ready():
+    config = {
+        "indicators": {"sma3": {"type": "sma", "period": 3}, "rsi3": {"type": "rsi", "period": 3}},
+        "entry_rule": {"operator": "AND", "conditions": []},
+        "exit_rule": {"operator": "AND", "conditions": []},
+    }
+    engine = SignalEngine(config["indicators"], config["entry_rule"], config["exit_rule"])
+
+    base_dt = datetime(2026, 7, 27, 9, 0)  # 前営業日のデータを想定
+    closes = [1000, 1002, 1001, 1005, 1010]
+    bars = [
+        Bar("9432", base_dt + timedelta(minutes=i), c - 1, c + 1, c - 2, c, 1000)
+        for i, c in enumerate(closes)
+    ]
+
+    results = engine.warmup_symbol_from_bars("9432", bars)
+    assert results["sma3"] is True
+    assert results["rsi3"] is True
+
+    ctx = engine.get_context("9432")
+    snap = ctx.snapshot()
+    # 実データそのものを使っているので、直近3本の単純平均と厳密に一致するはず
+    assert snap["sma3"]["sma3"] == (1001 + 1005 + 1010) / 3
+    print("test_warmup_symbol_from_bars_uses_real_data_and_becomes_ready: OK", snap)
+
+
+def test_warmup_symbol_from_bars_session_scoped_indicators_reset_on_new_day():
+    """
+    VWAP・ARのように日次リセット前提の指標は、過去日のバーを流し込むと
+    その日の分だけは準備できてしまうことがあるが、本番で実際に「今日」の
+    Tickが届いた瞬間にセッションが切り替わり、正しくリセットされることを確認する
+    （＝過去日のリプレイが「今日」に誤って持ち越されないことの確認）。
+    """
+    config = {
+        "indicators": {"vwap": {"type": "vwap"}, "ar": {"type": "opening_range_ar", "bar_count": 2}},
+        "entry_rule": {"operator": "AND", "conditions": []},
+        "exit_rule": {"operator": "AND", "conditions": []},
+    }
+    engine = SignalEngine(config["indicators"], config["entry_rule"], config["exit_rule"])
+
+    yesterday = datetime(2026, 7, 27, 9, 0)  # 前営業日
+    bars = [Bar("9432", yesterday + timedelta(minutes=i), 1000 + i, 1001 + i, 999 + i, 1000 + i, 1000) for i in range(5)]
+    results = engine.warmup_symbol_from_bars("9432", bars)
+    # 前営業日1日分のリプレイなので、その日のうちはready担ってしまうことがある
+    assert results["vwap"] is True
+    assert results["ar"] is True
+
+    # 「今日」の最初のTickが届いた瞬間、日付が変わるためセッションがリセットされ、
+    # 前営業日ぶんの状態は正しく引き継がれない（想定どおりの挙動）
+    today = datetime(2026, 7, 28, 9, 0)
+    engine.update(PriceTick(symbol="9432", timestamp=today, price=1010.0, volume=500, open=1009, high=1011, low=1008))
+    ctx = engine.get_context("9432")
+    assert ctx.indicators["vwap"].is_ready() is True  # VWAPは1本目のTickだけでready
+    assert ctx.indicators["ar"].is_ready() is False  # ARはbar_count本(2本)必要なのでまだ
+    print("test_warmup_symbol_from_bars_session_scoped_indicators_reset_on_new_day: OK")
+
+
+def test_warmup_symbol_from_summary_skips_already_ready_indicators():
+    """
+    warmup_symbol_from_bars()で既にis_ready()になった指標へ、
+    warmup_symbol_from_summary()が上書きのseed()を呼ばないことを確認する。
+    """
+    config = {
+        "indicators": {"sma3": {"type": "sma", "period": 3}},
+        "entry_rule": {"operator": "AND", "conditions": []},
+        "exit_rule": {"operator": "AND", "conditions": []},
+    }
+    engine = SignalEngine(config["indicators"], config["entry_rule"], config["exit_rule"])
+
+    base_dt = datetime(2026, 7, 27, 9, 0)
+    bars = [Bar("9432", base_dt + timedelta(minutes=i), 100 + i, 101 + i, 99 + i, 100 + i, 1000) for i in range(3)]
+    engine.warmup_symbol_from_bars("9432", bars)
+    real_data_value = engine.get_context("9432").snapshot()["sma3"]["sma3"]  # 実データ由来の値（=(100+101+102)/3）
+
+    # 続けて、全く異なる前日終値でsummary版ウォームアップを呼んでも上書きされないはず
+    results = engine.warmup_symbol_from_summary("9432", timestamp=base_dt, prev_close=99999.0)
+    assert results["sma3"] is True
+    assert engine.get_context("9432").snapshot()["sma3"]["sma3"] == real_data_value
+    print("test_warmup_symbol_from_summary_skips_already_ready_indicators: OK", real_data_value)
+
+
 if __name__ == "__main__":
     test_rule_condition_basic()
     test_rule_condition_cross_reference()
@@ -273,4 +355,7 @@ if __name__ == "__main__":
     test_warmup_then_real_ticks_continue_naturally()
     test_warmup_symbol_from_summary_uses_precise_seed_values()
     test_warmup_symbol_from_summary_falls_back_when_missing_data()
+    test_warmup_symbol_from_bars_uses_real_data_and_becomes_ready()
+    test_warmup_symbol_from_bars_session_scoped_indicators_reset_on_new_day()
+    test_warmup_symbol_from_summary_skips_already_ready_indicators()
     print("\nすべてのテストに成功しました。")

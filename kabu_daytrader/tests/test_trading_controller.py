@@ -513,6 +513,46 @@ def test_controller_pending_symbols_prevents_duplicate_queueing():
     print("test_controller_pending_symbols_prevents_duplicate_queueing: OK")
 
 
+def test_controller_start_warms_up_from_db_when_available():
+    """
+    DBに実際の1分足データがある場合、CSV要約値より優先してそちらでウォームアップし、
+    かつCSV由来のフォールバックで上書きされないことを確認する（unittest.mockでDBをモック化）。
+    """
+    import tempfile
+    from unittest.mock import patch
+    from backtest.models import Bar
+
+    base_dt = datetime(2026, 7, 27, 9, 0)
+    fake_bars = [
+        Bar("9432", base_dt + timedelta(minutes=i), 1000 + i, 1001 + i, 999 + i, 1000 + i, 1000)
+        for i in range(20)
+    ]
+
+    with tempfile.TemporaryDirectory() as td:
+        config_path = f"{td}/config.ini"
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write("[postgresql]\nhost=localhost\nport=5433\ndbname=quants\nuser=postgres\npassword=dummy\n")
+
+        broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
+        settings = _make_settings(
+            indicators={"sma3": {"type": "sma", "period": 3}},
+            bar_interval_minutes=1,
+        )
+        # CSV要約値は実データと全く異なる値にしておき、上書きされていないことを確認する
+        watchlist = [WatchlistEntry(symbol="9432", name="NTT", prev_close=99999.0)]
+        controller = TradingController(broker=broker, settings=settings, watchlist=watchlist, pg_config_path=config_path)
+
+        with patch("storage.pg_load_bars", return_value=fake_bars) as mock_load:
+            controller._warmup_indicators()
+            mock_load.assert_called_once()
+            assert mock_load.call_args.kwargs["codes"] == ["9432"]
+
+        snap = controller.signal_engine.get_context("9432").snapshot()
+        # 実データ由来の値（直近3本の単純平均）になっているはず。CSVの99999は使われていない
+        assert snap["sma3"]["sma3"] == (1017 + 1018 + 1019) / 3
+    print("test_controller_start_warms_up_from_db_when_available: OK", snap)
+
+
 if __name__ == "__main__":
     test_controller_constructs_without_ws_url()
     test_controller_tick_triggers_entry_and_emits_signals()
@@ -528,4 +568,5 @@ if __name__ == "__main__":
     test_controller_start_runs_real_worker_thread_that_processes_orders_async()
     test_controller_check_forced_liquidation_does_not_block_caller()
     test_controller_pending_symbols_prevents_duplicate_queueing()
+    test_controller_start_warms_up_from_db_when_available()
     print("\nすべてのテストに成功しました。")

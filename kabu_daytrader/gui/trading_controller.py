@@ -137,6 +137,8 @@ class TradingController(QObject):
         （ARを使わない運用も可能なようにNoneを許容する設計）。
         """
 
+        self.pg_config_path = pg_config_path
+        """ウォームアップ時のDB実データ取得にも再利用する（_try_db_warmup参照）。"""
         self.pg_bar_writer = None
         self._pg_bar_aggregator: Optional[LiveBarAggregator] = None
         if pg_config_path is not None:
@@ -229,24 +231,63 @@ class TradingController(QObject):
         self.connection_status_changed.emit(True)
         logger.info("本番監視ループを開始しました（監視銘柄数: %d）", len(self.watchlist))
 
+    def _try_db_warmup(self, symbol: str) -> bool:
+        """
+        PostgreSQL（equities_bars_minute）にある実際の1分足データで指標を
+        ウォームアップする。pg_config_pathが未設定、DBへの接続失敗、
+        該当銘柄のデータが1件も無い場合はFalseを返す
+        （呼び出し元は従来のCSV要約値ベースのウォームアップにフォールバックすること）。
+        """
+        if not self.pg_config_path:
+            return False
+
+        try:
+            from storage import pg_load_bars
+            from backtest import resample_bars
+
+            end = datetime.combine(date.today(), dtime(0, 0))  # 今日の開始時刻＝前日までのデータが対象
+            start = end - timedelta(days=10)  # 指標のウォームアップに十分な本数を確保できる想定の余裕を持った期間
+            bars = pg_load_bars(self.pg_config_path, codes=[symbol], start=start, end=end)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("DBからの分足取得に失敗しました（フォールバックします）: %s (%s)", symbol, e)
+            return False
+
+        if not bars:
+            return False
+
+        if self.bar_interval_minutes > 1:
+            bars = resample_bars(bars, self.bar_interval_minutes)
+
+        results = self.signal_engine.warmup_symbol_from_bars(symbol, bars)
+        logger.info("DB実データでウォームアップ: %s -> %s (%d本の%d分足を使用)", symbol, results, len(bars), self.bar_interval_minutes)
+        return True
+
     def _warmup_indicators(self) -> None:
         """
-        各監視銘柄について、銘柄リストCSVで用意した前日の要約値
-        （前日終値・前日RSI・前日ボリンジャーバンド等）を使って指標をウォームアップする。
-        kabuステーションAPI経由での取得は行わない（分足の過去データを取得する
-        エンドポイントがなく、単一の前日終値だけでは精度が低いため、
-        CSVで別途用意した要約値を使う方式にした）。
+        各監視銘柄について、まずPostgreSQL（equities_bars_minute）にある実際の
+        1分足データ（本番と同じbar_interval_minutesへリサンプリング）で
+        指標をウォームアップする。DBにデータが無い・接続できない場合は、
+        従来どおり銘柄リストCSVの前日要約値（前日終値・前日RSI・前日ボリンジャー
+        バンド等）を使ったウォームアップにフォールバックする。
 
-        要約値が一部しかない銘柄はSignalEngine.warmup_symbol_from_summary()側で
-        可能な範囲でフォールバックする。前日終値すら無い銘柄はウォームアップを
-        スキップし、実際のTickが溜まるまで通常どおり待つ（致命的エラーにはしない）。
+        VWAP・AR（opening_range_ar）のように日次リセットが前提の指標は、
+        DB実データによるウォームアップでも当日の実データが必要なため、
+        当日最初のTickが届いてから自然に準備が整う（想定どおりの挙動）。
+
+        いずれの方法でも要約値・実データが無い銘柄はウォームアップをスキップし、
+        実際のTickが溜まるまで通常どおり待つ（致命的エラーにはしない）。
         """
         seed_timestamp = datetime.combine(date.today() - timedelta(days=1), dtime(15, 0))
         for symbol, entry in self._watchlist_by_symbol.items():
+            used_db = self._try_db_warmup(symbol)
+
             if entry.prev_close is None and entry.prev_rsi is None and entry.prev_bb_middle is None:
-                logger.warning("前日の要約値が無いためウォームアップをスキップ: %s", symbol)
+                if not used_db:
+                    logger.warning("DB実データ・前日の要約値のいずれも無いためウォームアップをスキップ: %s", symbol)
                 continue
 
+            # warmup_symbol_from_summary()は既にis_ready()な指標をスキップするため、
+            # DB実データで準備できた指標を上書きすることはない（不足分だけを補う）。
             results = self.signal_engine.warmup_symbol_from_summary(
                 symbol,
                 timestamp=seed_timestamp,

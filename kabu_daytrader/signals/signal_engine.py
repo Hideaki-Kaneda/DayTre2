@@ -11,7 +11,7 @@ SignalEngine：指標群の更新とentry_rule/exit_ruleの判定を行う中核
 
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from indicators import Indicator, PriceTick, create_indicator
 
@@ -116,6 +116,34 @@ class SignalEngine:
             count += 1
         return count
 
+    def warmup_symbol_from_bars(self, symbol: str, bars: List) -> Dict[str, bool]:
+        """
+        実際の過去の確定バー（backtest.models.Bar等、symbol/timestamp/open/high/low/
+        close/volumeを持つオブジェクト）を時系列順に1本ずつ通常のupdate()へ
+        流し込み、指標をウォームアップする。
+
+        warmup_symbol_from_summary()（前日の要約値からseed()で近似復元する方式）
+        と違い、実データそのものを使うため、対応する指標（SMA/RSI/BB等）は
+        より正確な状態を再現できる。
+
+        VWAP・AR（opening_range_ar）のように日次でリセットされる前提の指標は、
+        過去の日付のバーを流し込んでもis_ready()にはならない（＝当日の実データが
+        必要なため、これは想定どおりであり不具合ではない）。そのため、この
+        メソッドの戻り値だけで「ウォームアップ全体が成功したか」を判断せず、
+        指標ごとのis_ready()を見て、まだ準備できていない指標だけ
+        warmup_symbol_from_summary()等の別手段で補うこと。
+
+        戻り値: {指標キー: 実データ投入後にis_ready()になったか} の辞書
+        """
+        ctx = self.get_context(symbol)
+        for bar in bars:
+            tick = PriceTick(
+                symbol=symbol, timestamp=bar.timestamp, price=bar.close, volume=bar.volume,
+                open=bar.open, high=bar.high, low=bar.low,
+            )
+            ctx.update(tick)
+        return {key: ind.is_ready() for key, ind in ctx.indicators.items()}
+
     def warmup_symbol_from_summary(
         self,
         symbol: str,
@@ -135,18 +163,27 @@ class SignalEngine:
         RSI・ボリンジャーバンド）を使い、指標ごとにIndicator.seed()で
         直接ウォームアップする。
 
+        既に（例えばwarmup_symbol_from_bars()による実データ投入で）
+        is_ready()になっている指標はスキップし、seed()を呼ばない
+        （呼んでしまうと、実データによる正確な状態を要約値ベースの
+        近似で上書きしてしまうため）。
+
         各指標のseed()がFalse（対応する要約値がない、またはその指標自体が
         非対応）を返した場合は、prev_closeが分かっていれば、それを繰り返し
         投入するフォールバックでis_ready()を目指す（VWAPはそもそも
         日次リセットが前提のためこの対象外＝ウォームアップ不要）。
 
-        戻り値: {指標キー: シードに成功したか} の辞書
+        戻り値: {指標キー: シードに成功したか（既にready済みだった場合もTrue）} の辞書
         （呼び出し元でログ出力・不備の把握に使える）
         """
         ctx = self.get_context(symbol)
         results: Dict[str, bool] = {}
 
         for key, ind in ctx.indicators.items():
+            if ind.is_ready():
+                results[key] = True
+                continue
+
             seeded = ind.seed(
                 prev_close=prev_close, prev_open=prev_open, prev_high=prev_high, prev_low=prev_low,
                 prev_rsi=prev_rsi, prev_bb_upper=prev_bb_upper,
