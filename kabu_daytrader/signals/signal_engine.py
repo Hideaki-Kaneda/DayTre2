@@ -51,21 +51,27 @@ class SignalEngine:
         indicator_config: Dict[str, Dict[str, Any]],
         entry_rule: Dict[str, Any] | None,
         exit_rule: Dict[str, Any] | None,
+        entry_rule_short: Dict[str, Any] | None = None,
+        exit_rule_short: Dict[str, Any] | None = None,
     ):
         """
         indicator_config: 設定ファイルの "indicators" セクション。例:
             {
-                "sma_short": {"type": "sma", "period": 5},
-                "sma_long":  {"type": "sma", "period": 25},
-                "rsi14":     {"type": "rsi", "period": 14},
-                "bb":        {"type": "bollinger", "period": 20, "num_std": 2},
-                "vwap":      {"type": "vwap"}
+                "rsi6": {"type": "rsi", "period": 6},
+                "macd": {"type": "macd", "fast_period": 7, "slow_period": 26, "signal_period": 7},
+                "dmi":  {"type": "dmi", "di_period": 6, "adx_period": 14}
             }
-        entry_rule / exit_rule: rule_config.RuleGroup.from_dict が読める形式のdict
+        entry_rule / exit_rule: 買い（LONG）のエントリー/決済ルール。
+            rule_config.RuleGroup.from_dict が読める形式のdict。
+        entry_rule_short / exit_rule_short: 売り＝信用新規売り（SHORT）の
+            エントリー/決済ルール。省略時は「常にFalse」の空ルールになり、
+            売り側のシグナルは一切発火しない（既存の買い専用運用と後方互換）。
         """
         self._indicator_config = indicator_config
         self.entry_rule: RuleGroup = load_rule(entry_rule)
         self.exit_rule: RuleGroup = load_rule(exit_rule)
+        self.entry_rule_short: RuleGroup = load_rule(entry_rule_short)
+        self.exit_rule_short: RuleGroup = load_rule(exit_rule_short)
         self._contexts: Dict[str, SymbolContext] = {}
 
     # ------------------------------------------------------------------
@@ -203,10 +209,20 @@ class SignalEngine:
     # シグナル判定
     # ------------------------------------------------------------------
     def evaluate_entry(self, symbol: str, rule_name: str = "entry_rule") -> Optional[SignalEvent]:
+        """買い（LONG）の新規エントリー判定。"""
         return self._evaluate(symbol, self.entry_rule, "ENTRY", rule_name)
 
     def evaluate_exit(self, symbol: str, rule_name: str = "exit_rule") -> Optional[SignalEvent]:
+        """買い（LONG）の決済判定。"""
         return self._evaluate(symbol, self.exit_rule, "EXIT", rule_name)
+
+    def evaluate_entry_short(self, symbol: str, rule_name: str = "entry_rule_short") -> Optional[SignalEvent]:
+        """売り＝信用新規売り（SHORT）の新規エントリー判定。"""
+        return self._evaluate(symbol, self.entry_rule_short, "ENTRY", rule_name)
+
+    def evaluate_exit_short(self, symbol: str, rule_name: str = "exit_rule_short") -> Optional[SignalEvent]:
+        """売り（SHORT）の決済判定。"""
+        return self._evaluate(symbol, self.exit_rule_short, "EXIT", rule_name)
 
     def _evaluate(
         self, symbol: str, rule: RuleGroup, signal_type: str, rule_name: str

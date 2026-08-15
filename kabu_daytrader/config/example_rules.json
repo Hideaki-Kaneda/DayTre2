@@ -28,5 +28,30 @@
       {"indicator": "dmi", "field": "adx", "op": ">", "value": 50},
       {"indicator": "dmi", "field": "pdi", "op": "<", "value": "dmi.mdi"}
     ]
+  },
+  "entry_rule_short": {
+    "operator": "AND",
+    "conditions": [
+      {"indicator": "rsi6", "field": "rsi6", "op": ">", "value": 65},
+      {"indicator": "macd", "field": "macd", "op": ">", "value": 0},
+      {"indicator": "macd", "field": "dea", "op": ">", "value": 10},
+      {"indicator": "dmi", "field": "adx", "op": "<", "value": 50},
+      {"indicator": "dmi", "field": "mdi", "op": "<", "value": "dmi.pdi"}
+    ]
+  },
+  "exit_rule_short": {
+    "operator": "AND",
+    "conditions": [
+      {"indicator": "rsi6", "field": "rsi6", "op": ">", "value": 35},
+      {
+        "operator": "OR",
+        "conditions": [
+          {"indicator": "macd", "field": "macd_crossed_down", "op": "==", "value": true},
+          {"indicator": "macd", "field": "dif_crossed_dea_down", "op": "==", "value": true}
+        ]
+      },
+      {"indicator": "dmi", "field": "adx", "op": ">", "value": 50},
+      {"indicator": "dmi", "field": "pdi", "op": ">", "value": "dmi.mdi"}
+    ]
   }
 }

@@ -9,7 +9,7 @@ PositionManager：建玉（ポジション）の管理。
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from .models import ClosedPositionResult, OrderReason, Position
+from .models import ClosedPositionResult, OrderReason, Position, PositionDirection
 
 
 class DuplicateEntryError(Exception):
@@ -36,6 +36,7 @@ class PositionManager:
         entry_price: float,
         entry_order_id: str,
         entry_at: datetime,
+        direction: PositionDirection = PositionDirection.LONG,
     ) -> Position:
         if self.has_position(symbol):
             raise DuplicateEntryError(
@@ -47,6 +48,7 @@ class PositionManager:
             entry_price=entry_price,
             entry_order_id=entry_order_id,
             entry_at=entry_at,
+            direction=direction,
             high_water_mark=entry_price,
         )
         self._positions[symbol] = position
@@ -63,7 +65,12 @@ class PositionManager:
         if position is None:
             raise KeyError(f"銘柄 {symbol} の保有ポジションが見つかりません")
 
-        realized_pnl = (exit_price - position.entry_price) * position.qty
+        if position.direction == PositionDirection.SHORT:
+            # 売り建て（空売り）は値下がりが利益になる
+            realized_pnl = (position.entry_price - exit_price) * position.qty
+        else:
+            realized_pnl = (exit_price - position.entry_price) * position.qty
+
         return ClosedPositionResult(
             symbol=symbol,
             qty=position.qty,
@@ -73,6 +80,7 @@ class PositionManager:
             exit_at=exit_at,
             reason=reason,
             realized_pnl=realized_pnl,
+            direction=position.direction,
         )
 
     def position_count(self) -> int:

@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .broker_client import BrokerClient
-from .models import ClosedPositionResult, OrderReason, OrderResult, OrderStatus
+from .models import ClosedPositionResult, OrderReason, OrderResult, OrderStatus, PositionDirection
 from .position_manager import PositionManager
 from .risk_manager import RiskManager
 
@@ -44,22 +44,27 @@ class OrderExecutor:
         """
 
     # ------------------------------------------------------------------
-    # エントリー
+    # エントリー（信用取引：買い建て＝LONG、売り建て＝SHORT）
     # ------------------------------------------------------------------
     def try_entry(
-        self, symbol: str, current_price: float, now: Optional[datetime] = None
+        self,
+        symbol: str,
+        current_price: float,
+        now: Optional[datetime] = None,
+        direction: PositionDirection = PositionDirection.LONG,
     ) -> Optional[OrderResult]:
         """
-        1銘柄への新規エントリーを試みる。
+        1銘柄への新規エントリーを試みる（信用取引。買い建て＝LONG、売り建て＝SHORT）。
         以下の場合は発注そのものを行わず None を返す（発注失敗としてログしない）:
           - 新規エントリー停止中（日次上限到達／PUSH切断確定後）
           - entry_start_time より前（寄り付き直後のボラティリティが高い時間帯を回避）
           - 決済直後のクールダウン中（reentry_cooldown_bars本のバーが経過していない）
-          - 既に当該銘柄のポジションを保有中（重複エントリー禁止）
+          - 既に当該銘柄のポジションを保有中（方向を問わず重複エントリー禁止）
           - 買付余力が不足している
 
         now: エントリー可否の時刻判定に使う時刻。省略時は現在時刻を使う
              （バックテストではTickのタイムスタンプを明示的に渡すこと）。
+        direction: PositionDirection.LONG（買い建て）または SHORT（売り建て＝空売り）。
         """
         now = now or datetime.now()
 
@@ -87,7 +92,10 @@ class OrderExecutor:
             logger.info("買付余力不足のためエントリー見送り: %s (概算必要額=%.0f)", symbol, estimated_cost)
             return None
 
-        result = self.broker.place_market_buy(symbol, self.shares_per_symbol)
+        if direction == PositionDirection.LONG:
+            result = self.broker.place_margin_buy_to_open(symbol, self.shares_per_symbol)
+        else:
+            result = self.broker.place_margin_sell_to_open(symbol, self.shares_per_symbol)
         result.reason = OrderReason.SIGNAL
 
         if result.status == OrderStatus.FILLED and result.filled_price is not None:
@@ -97,18 +105,21 @@ class OrderExecutor:
                 entry_price=result.filled_price,
                 entry_order_id=result.order_id,
                 entry_at=result.filled_at or datetime.now(),
+                direction=direction,
             )
         else:
-            logger.warning("発注失敗: %s reason=%s", symbol, result.error_message)
+            logger.warning("エントリー発注失敗: %s direction=%s reason=%s", symbol, direction, result.error_message)
 
         return result
 
     def try_entries_in_rank_order(
-        self, ranked_candidates: List[Tuple[str, float]], now: Optional[datetime] = None
+        self,
+        ranked_candidates: List[Tuple[str, float, PositionDirection]],
+        now: Optional[datetime] = None,
     ) -> List[OrderResult]:
         """
-        ranked_candidates: [(symbol, current_price), ...] スクリーナー順位順
-        （リストの先頭が最も優先度が高い銘柄）。
+        ranked_candidates: [(symbol, current_price, direction), ...] スクリーナー順位順
+        （リストの先頭が最も優先度が高い銘柄）。方向はLONG/SHORTが混在してよい。
 
         買付余力が尽きた時点、新規エントリーが停止された時点、または
         entry_start_timeより前の時点で、それ以降の銘柄への発注は行わない
@@ -127,7 +138,7 @@ class OrderExecutor:
             return []
 
         results: List[OrderResult] = []
-        for symbol, price in ranked_candidates:
+        for symbol, price, direction in ranked_candidates:
             if self.risk_manager.trading_halted:
                 logger.info("新規エントリー停止中のため以降の候補への発注を打ち切ります")
                 break
@@ -143,14 +154,14 @@ class OrderExecutor:
                 logger.info("買付余力が尽きたため、以降の候補への発注を打ち切ります（%s以降）", symbol)
                 break
 
-            result = self.try_entry(symbol, price, now=now)
+            result = self.try_entry(symbol, price, now=now, direction=direction)
             if result is not None:
                 results.append(result)
 
         return results
 
     # ------------------------------------------------------------------
-    # 決済
+    # 決済（信用返済。保有ポジションのdirectionに応じて反対売買を行う）
     # ------------------------------------------------------------------
     def try_exit(
         self, symbol: str, current_price: float, reason: OrderReason
@@ -160,7 +171,10 @@ class OrderExecutor:
             logger.debug("保有ポジションがないため決済スキップ: %s", symbol)
             return None
 
-        result = self.broker.place_market_sell(symbol, position.qty)
+        if position.direction == PositionDirection.LONG:
+            result = self.broker.place_margin_sell_to_close(symbol, position.qty)
+        else:
+            result = self.broker.place_margin_buy_to_close(symbol, position.qty)
         result.reason = reason
 
         if result.status == OrderStatus.FILLED and result.filled_price is not None:

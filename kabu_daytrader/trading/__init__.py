@@ -7,6 +7,7 @@ from .models import (
     OrderSide,
     OrderStatus,
     Position,
+    PositionDirection,
 )
 from .order_executor import OrderExecutor
 from .position_manager import DuplicateEntryError, PositionManager
@@ -22,6 +23,7 @@ __all__ = [
     "OrderSide",
     "OrderStatus",
     "Position",
+    "PositionDirection",
     "OrderExecutor",
     "DuplicateEntryError",
     "PositionManager",

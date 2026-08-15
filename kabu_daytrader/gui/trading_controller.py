@@ -42,6 +42,7 @@ from trading import (
     OrderExecutor,
     OrderReason,
     OrderResult,
+    PositionDirection,
     PositionManager,
     RiskManager,
 )
@@ -103,6 +104,8 @@ class TradingController(QObject):
             indicator_config=settings.get("indicators", {}),
             entry_rule=settings.get("entry_rule", {}),
             exit_rule=settings.get("exit_rule", {}),
+            entry_rule_short=settings.get("entry_rule_short"),
+            exit_rule_short=settings.get("exit_rule_short"),
         )
         self.position_manager = PositionManager()
 
@@ -450,6 +453,7 @@ class TradingController(QObject):
             has_position_before = self.position_manager.has_position(symbol)
 
             if has_position_before:
+                position = self.position_manager.get_position(symbol)
                 self.position_manager.update_high_water_mark(symbol, completed_bar.price)
                 ar_value = None
                 if self.ar_indicator_key is not None:
@@ -463,7 +467,10 @@ class TradingController(QObject):
                     symbol, completed_bar.price, ar_value
                 )
                 if order_result is None:
-                    exit_event = self.signal_engine.evaluate_exit(symbol)
+                    if position is not None and position.direction == PositionDirection.LONG:
+                        exit_event = self.signal_engine.evaluate_exit(symbol)
+                    else:
+                        exit_event = self.signal_engine.evaluate_exit_short(symbol)
                     if exit_event is not None:
                         signal_fired = "EXIT"
                         self._persist_signal(exit_event)
@@ -472,6 +479,10 @@ class TradingController(QObject):
                         )
             else:
                 entry_event = self.signal_engine.evaluate_entry(symbol)
+                direction = PositionDirection.LONG
+                if entry_event is None:
+                    entry_event = self.signal_engine.evaluate_entry_short(symbol)
+                    direction = PositionDirection.SHORT
                 if entry_event is not None:
                     signal_fired = "ENTRY"
                     self._persist_signal(entry_event)
@@ -481,7 +492,7 @@ class TradingController(QObject):
                     # 発注しないため、実質的に「余力がなくなるまで順次エントリー」という
                     # 要件は満たされる）
                     order_result = self.order_executor.try_entry(
-                        symbol, completed_bar.price, now=completed_bar.timestamp
+                        symbol, completed_bar.price, now=completed_bar.timestamp, direction=direction,
                     )
 
             if order_result is not None:

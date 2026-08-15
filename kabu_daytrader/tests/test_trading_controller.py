@@ -111,6 +111,40 @@ def test_controller_signal_exit_after_entry():
     print("test_controller_signal_exit_after_entry: OK")
 
 
+def test_controller_short_entry_and_signal_exit():
+    """売り（SHORT、信用新規売り）のエントリー・決済がライブ監視ループでも機能することを確認する。"""
+    from trading import OrderReason, OrderSide, PositionDirection
+
+    broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
+    settings = _make_settings(
+        indicators={"rsi3": {"type": "rsi", "period": 3}},
+        entry_rule={"operator": "AND", "conditions": []},  # 買い側は使わない
+        exit_rule={"operator": "AND", "conditions": []},
+        entry_rule_short={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": ">", "value": 80}]},
+        exit_rule_short={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": "<", "value": 40}]},
+    )
+    controller = TradingController(broker=broker, settings=settings, watchlist=[WatchlistEntry(symbol="9432", name="NTT")])
+    controller.risk_manager.start_new_trading_day(datetime(2026, 7, 28).date())
+
+    received_orders = []
+    controller.order_event.connect(lambda r: received_orders.append(r))
+
+    base_dt = datetime(2026, 7, 28, 9, 0)
+    # 上昇してRSI3>80でSHORTエントリー → 下落してRSI3<40で決済（値下がりなので利益）
+    prices = [100, 101, 102, 110, 95, 80]
+    for i, p in enumerate(prices):
+        broker.set_current_price("9432", float(p))
+        controller._on_tick(PriceTick(symbol="9432", timestamp=base_dt + timedelta(minutes=i), price=float(p), volume=1000))
+        controller.process_pending_orders_sync()
+
+    assert controller.position_manager.has_position("9432") is False
+    assert len(received_orders) == 2
+    entry_order, exit_order = received_orders
+    assert entry_order.side == OrderSide.SELL  # 信用新規売り
+    assert exit_order.side == OrderSide.BUY  # 信用返済買い
+    print("test_controller_short_entry_and_signal_exit: OK")
+
+
 def test_controller_check_forced_liquidation_closes_all_positions():
     broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
     controller = TradingController(
@@ -268,6 +302,18 @@ def test_controller_start_unregisters_before_registering():
         def place_market_sell(self, symbol, qty):
             raise NotImplementedError
 
+        def place_margin_buy_to_open(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_sell_to_open(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_sell_to_close(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_buy_to_close(self, symbol, qty):
+            raise NotImplementedError
+
     broker = FakeBroker()
     controller = TradingController(broker=broker, settings=_make_settings(), watchlist=[WatchlistEntry(symbol="9432", name="NTT"), WatchlistEntry(symbol="7203", name="トヨタ")])
     controller.start()
@@ -302,6 +348,18 @@ def test_controller_start_warms_up_indicators_from_watchlist_entry_summary():
             raise NotImplementedError
 
         def place_market_sell(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_buy_to_open(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_sell_to_open(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_sell_to_close(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_buy_to_close(self, symbol, qty):
             raise NotImplementedError
 
     broker = FakeBroker()
@@ -392,6 +450,18 @@ def test_controller_start_and_close_manage_postgres_connection():
         def place_market_sell(self, symbol, qty):
             raise NotImplementedError
 
+        def place_margin_buy_to_open(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_sell_to_open(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_sell_to_close(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_buy_to_close(self, symbol, qty):
+            raise NotImplementedError
+
     with tempfile.TemporaryDirectory() as td:
         config_path = f"{td}/config.ini"
         with open(config_path, "w", encoding="utf-8") as f:
@@ -433,6 +503,12 @@ def test_controller_start_runs_real_worker_thread_that_processes_orders_async():
             return 1_000_000.0
 
         def place_market_buy(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_market_sell(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_buy_to_open(self, symbol, qty):
             from trading.models import OrderReason, OrderResult, OrderSide, OrderStatus
             call_order.append("place_market_buy")
             return OrderResult(
@@ -441,7 +517,13 @@ def test_controller_start_runs_real_worker_thread_that_processes_orders_async():
                 requested_at=datetime.now(), filled_at=datetime.now(), filled_price=100.0,
             )
 
-        def place_market_sell(self, symbol, qty):
+        def place_margin_sell_to_open(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_sell_to_close(self, symbol, qty):
+            raise NotImplementedError
+
+        def place_margin_buy_to_close(self, symbol, qty):
             raise NotImplementedError
 
     settings = _make_settings()
@@ -560,6 +642,7 @@ if __name__ == "__main__":
     test_controller_constructs_without_ws_url()
     test_controller_tick_triggers_entry_and_emits_signals()
     test_controller_signal_exit_after_entry()
+    test_controller_short_entry_and_signal_exit()
     test_controller_check_forced_liquidation_closes_all_positions()
     test_controller_persists_to_db_when_db_path_given()
     test_controller_db_access_from_different_thread_does_not_raise()

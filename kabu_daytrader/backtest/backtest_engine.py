@@ -19,6 +19,7 @@ from trading import (
     OrderExecutor,
     OrderReason,
     OrderStatus,
+    PositionDirection,
     PositionManager,
     RiskManager,
     SimulatedBrokerClient,
@@ -33,6 +34,10 @@ class BacktestConfig:
     indicator_config: Dict[str, Dict[str, Any]]
     entry_rule: Dict[str, Any]
     exit_rule: Dict[str, Any]
+    entry_rule_short: Optional[Dict[str, Any]] = None
+    """売り＝信用新規売り（SHORT）のエントリールール。省略時は売り側は一切発火しない。"""
+    exit_rule_short: Optional[Dict[str, Any]] = None
+    """売り（SHORT）の決済ルール。"""
     initial_buying_power: float = 1_000_000.0
     shares_per_symbol: int = 100
     stop_loss_pct: float = 0.97
@@ -80,6 +85,8 @@ class BacktestEngine:
             indicator_config=self.config.indicator_config,
             entry_rule=self.config.entry_rule,
             exit_rule=self.config.exit_rule,
+            entry_rule_short=self.config.entry_rule_short,
+            exit_rule_short=self.config.exit_rule_short,
         )
         broker = SimulatedBrokerClient(initial_buying_power=self.config.initial_buying_power)
         position_manager = PositionManager()
@@ -133,8 +140,10 @@ class BacktestEngine:
                 last_prices[bar.symbol] = bar.close
 
             # 2) 保有中銘柄：最高値更新 → トレール決済 → exit_ruleの順で判定
+            #    （方向がLONGならexit_rule、SHORTならexit_rule_shortを使う）
             for bar in bar_group:
-                if not position_manager.has_position(bar.symbol):
+                position = position_manager.get_position(bar.symbol)
+                if position is None:
                     continue
                 position_manager.update_high_water_mark(bar.symbol, bar.close)
                 ar_value = None
@@ -143,19 +152,28 @@ class BacktestEngine:
                 result = executor.check_and_apply_trailing_stop(bar.symbol, bar.close, ar_value)
                 if result is not None:
                     continue  # トレール決済済みならexit_rule判定は不要
-                exit_event = signal_engine.evaluate_exit(bar.symbol)
+
+                if position.direction == PositionDirection.LONG:
+                    exit_event = signal_engine.evaluate_exit(bar.symbol)
+                else:
+                    exit_event = signal_engine.evaluate_exit_short(bar.symbol)
                 if exit_event is not None:
                     executor.try_exit(bar.symbol, bar.close, OrderReason.SIGNAL)
 
-            # 3) 未保有銘柄：entry_ruleを満たした候補をランク順に発注
+            # 3) 未保有銘柄：entry_rule（買い）・entry_rule_short（売り）を満たした
+            #    候補をランク順に発注（両方向の候補が混在してよい）
             entry_candidates = []
             for bar in bar_group:
                 if position_manager.has_position(bar.symbol):
                     continue
                 entry_event = signal_engine.evaluate_entry(bar.symbol)
                 if entry_event is not None:
-                    entry_candidates.append((bar.symbol, bar.close))
-            entry_candidates.sort(key=lambda sp: rank_of(sp[0]))
+                    entry_candidates.append((bar.symbol, bar.close, PositionDirection.LONG))
+                    continue  # 同一バーで買い・売り両方は成立させない（先に買いを優先）
+                entry_event_short = signal_engine.evaluate_entry_short(bar.symbol)
+                if entry_event_short is not None:
+                    entry_candidates.append((bar.symbol, bar.close, PositionDirection.SHORT))
+            entry_candidates.sort(key=lambda spd: rank_of(spd[0]))
             if entry_candidates:
                 entry_results = executor.try_entries_in_rank_order(entry_candidates, now=timestamp)
                 for result in entry_results:

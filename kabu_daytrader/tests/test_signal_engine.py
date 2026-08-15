@@ -315,6 +315,51 @@ def test_warmup_symbol_from_summary_skips_already_ready_indicators():
     print("test_warmup_symbol_from_summary_skips_already_ready_indicators: OK", real_data_value)
 
 
+def test_signal_engine_short_rules_fire_independently_of_long_rules():
+    """売り側ルール(entry_rule_short/exit_rule_short)が買い側とは独立して判定されることを確認する。"""
+    config = {
+        "indicators": {"rsi3": {"type": "rsi", "period": 3}},
+        "entry_rule": {"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": "<", "value": 20}]},
+        "exit_rule": {"operator": "AND", "conditions": []},
+        "entry_rule_short": {"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": ">", "value": 80}]},
+        "exit_rule_short": {"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": "<", "value": 50}]},
+    }
+    engine = SignalEngine(
+        config["indicators"], config["entry_rule"], config["exit_rule"],
+        entry_rule_short=config["entry_rule_short"], exit_rule_short=config["exit_rule_short"],
+    )
+
+    base_dt = datetime(2026, 7, 28, 9, 0)
+    # 上昇させてRSIを高くする（買い側entry_ruleは不成立、売り側entry_ruleが成立するはず）
+    prices = [100, 101, 102, 110]
+    for i, p in enumerate(prices):
+        engine.process_tick(PriceTick(symbol="9432", timestamp=base_dt + timedelta(minutes=i), price=float(p)), has_position=False)
+
+    assert engine.evaluate_entry("9432") is None  # 買い側は不成立
+    short_entry = engine.evaluate_entry_short("9432")
+    assert short_entry is not None
+    assert short_entry.rule_name == "entry_rule_short"
+    print("test_signal_engine_short_rules_fire_independently_of_long_rules: OK")
+
+
+def test_signal_engine_short_rules_default_to_never_firing_when_unset():
+    """entry_rule_short/exit_rule_shortを指定しない場合、既存の買い専用運用と同じく常にFalseになることを確認する。"""
+    config = {
+        "indicators": {"rsi3": {"type": "rsi", "period": 3}},
+        "entry_rule": {"operator": "AND", "conditions": []},
+        "exit_rule": {"operator": "AND", "conditions": []},
+    }
+    engine = SignalEngine(config["indicators"], config["entry_rule"], config["exit_rule"])
+
+    base_dt = datetime(2026, 7, 28, 9, 0)
+    for i, p in enumerate([100, 99, 98, 97]):
+        engine.process_tick(PriceTick(symbol="9432", timestamp=base_dt + timedelta(minutes=i), price=float(p)), has_position=False)
+
+    assert engine.evaluate_entry_short("9432") is None
+    assert engine.evaluate_exit_short("9432") is None
+    print("test_signal_engine_short_rules_default_to_never_firing_when_unset: OK")
+
+
 if __name__ == "__main__":
     test_rule_condition_basic()
     test_rule_condition_cross_reference()
@@ -330,4 +375,6 @@ if __name__ == "__main__":
     test_warmup_symbol_from_bars_uses_real_data_and_becomes_ready()
     test_warmup_symbol_from_bars_session_scoped_indicators_reset_on_new_day()
     test_warmup_symbol_from_summary_skips_already_ready_indicators()
+    test_signal_engine_short_rules_fire_independently_of_long_rules()
+    test_signal_engine_short_rules_default_to_never_firing_when_unset()
     print("\nすべてのテストに成功しました。")

@@ -15,6 +15,17 @@ class OrderSide(str, Enum):
     SELL = "SELL"
 
 
+class PositionDirection(str, Enum):
+    """
+    ポジションの方向。OrderSide（発注時の売買方向）とは別概念で、
+    「保有しているポジションが買い建てか売り建てか」を表す。
+    LONG（買い建て）の決済はSELL、SHORT（売り建て＝信用新規売り）の決済はBUY。
+    """
+
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+
 class OrderStatus(str, Enum):
     PENDING = "PENDING"
     FILLED = "FILLED"
@@ -59,8 +70,12 @@ class Position:
     entry_order_id: str
     entry_at: datetime
     status: str = "OPEN"  # 'OPEN' / 'CLOSED'
+    direction: PositionDirection = PositionDirection.LONG
+    """買い建て（LONG）か売り建て＝信用新規売り（SHORT）か。既定LONG（後方互換）。"""
     high_water_mark: float = 0.0
-    """保有中に記録した最高値（トレール決済の基準）。open_position()時にentry_priceで初期化する。"""
+    """保有中に記録した最高値（トレール決済の基準）。open_position()時にentry_priceで初期化する。
+    【廃止予定】AR×倍率のトレール決済で使っていたが、AR指標削除に伴い実質未使用。
+    新しい固定値ラチェット式ストップに置き換わる予定。"""
 
 
 @dataclass
@@ -75,3 +90,4 @@ class ClosedPositionResult:
     exit_at: datetime
     reason: OrderReason
     realized_pnl: float
+    direction: PositionDirection = PositionDirection.LONG

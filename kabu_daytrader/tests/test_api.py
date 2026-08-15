@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from api.push_message_parser import PushMessageParser  # noqa: E402
 from api.rate_limiter import RateLimiter  # noqa: E402
 from api.reconnect_policy import ReconnectPolicy  # noqa: E402
-from api.rest_client import AccountConfig, KabuApiError, RestClient  # noqa: E402
+from api.rest_client import AccountConfig, KabuApiError, MarginConfig, RestClient  # noqa: E402
 from trading.models import OrderStatus  # noqa: E402
 
 
@@ -392,6 +392,118 @@ def test_rest_client_extract_filled_price_weighted_average():
     print("test_rest_client_extract_filled_price_weighted_average: OK", price)
 
 
+def test_rest_client_margin_buy_to_open_builds_correct_payload():
+    session = MagicMock()
+    session.post.side_effect = [
+        _mock_response(200, {"Token": "TOKEN123"}),
+        _mock_response(200, {"Result": 0, "OrderId": "M-ORDER-001"}),
+    ]
+    session.get.return_value = _mock_response(200, [
+        {"ID": "M-ORDER-001", "State": 5, "CumQty": 100.0, "Details": [{"Price": 500.0, "Qty": 100.0}]}
+    ])
+    client = RestClient(base_url="http://localhost:18080/kabusapi", api_password="pass", session=session)
+    result = client.place_margin_buy_to_open("9433", 100)
+
+    payload = session.post.call_args_list[1].kwargs["json"]
+    assert payload["Side"] == "2"  # 買
+    assert payload["CashMargin"] == 2  # 信用新規
+    assert payload["MarginTradeType"] == 3  # 既定：一般信用（デイトレ）
+    assert payload["DelivType"] == 0  # 信用新規
+    assert payload["FundType"] == "11"
+    assert payload["Exchange"] == 27  # 東証+
+    assert "ClosePositionOrder" not in payload  # 新規注文では指定しない
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_price == 500.0
+    print("test_rest_client_margin_buy_to_open_builds_correct_payload: OK")
+
+
+def test_rest_client_margin_sell_to_open_builds_correct_payload():
+    session = MagicMock()
+    session.post.side_effect = [
+        _mock_response(200, {"Token": "TOKEN123"}),
+        _mock_response(200, {"Result": 0, "OrderId": "M-ORDER-002"}),
+    ]
+    session.get.return_value = _mock_response(200, [
+        {"ID": "M-ORDER-002", "State": 5, "CumQty": 100.0, "Details": [{"Price": 480.0, "Qty": 100.0}]}
+    ])
+    client = RestClient(base_url="http://localhost:18080/kabusapi", api_password="pass", session=session)
+    result = client.place_margin_sell_to_open("9433", 100)
+
+    payload = session.post.call_args_list[1].kwargs["json"]
+    assert payload["Side"] == "1"  # 売（空売り）
+    assert payload["CashMargin"] == 2  # 信用新規
+    assert payload["DelivType"] == 0
+    assert result.status == OrderStatus.FILLED
+    print("test_rest_client_margin_sell_to_open_builds_correct_payload: OK")
+
+
+def test_rest_client_margin_sell_to_close_builds_correct_payload():
+    """買い建て玉の返済＝反対売買の売り。ClosePositionOrderが指定されることを確認する。"""
+    session = MagicMock()
+    session.post.side_effect = [
+        _mock_response(200, {"Token": "TOKEN123"}),
+        _mock_response(200, {"Result": 0, "OrderId": "M-ORDER-003"}),
+    ]
+    session.get.return_value = _mock_response(200, [
+        {"ID": "M-ORDER-003", "State": 5, "CumQty": 100.0, "Details": [{"Price": 510.0, "Qty": 100.0}]}
+    ])
+    client = RestClient(base_url="http://localhost:18080/kabusapi", api_password="pass", session=session)
+    result = client.place_margin_sell_to_close("9433", 100)
+
+    payload = session.post.call_args_list[1].kwargs["json"]
+    assert payload["Side"] == "1"  # 買い建ての返済は売り
+    assert payload["CashMargin"] == 3  # 信用返済
+    assert payload["DelivType"] == 2  # 返済のDelivType
+    assert payload["ClosePositionOrder"] == 0  # 決済順序指定（既定値）
+    assert result.status == OrderStatus.FILLED
+    print("test_rest_client_margin_sell_to_close_builds_correct_payload: OK")
+
+
+def test_rest_client_margin_buy_to_close_builds_correct_payload():
+    """売り建て玉（空売り）の返済＝反対売買の買い。"""
+    session = MagicMock()
+    session.post.side_effect = [
+        _mock_response(200, {"Token": "TOKEN123"}),
+        _mock_response(200, {"Result": 0, "OrderId": "M-ORDER-004"}),
+    ]
+    session.get.return_value = _mock_response(200, [
+        {"ID": "M-ORDER-004", "State": 5, "CumQty": 100.0, "Details": [{"Price": 470.0, "Qty": 100.0}]}
+    ])
+    client = RestClient(base_url="http://localhost:18080/kabusapi", api_password="pass", session=session)
+    result = client.place_margin_buy_to_close("9433", 100)
+
+    payload = session.post.call_args_list[1].kwargs["json"]
+    assert payload["Side"] == "2"  # 売り建ての返済は買い
+    assert payload["CashMargin"] == 3
+    assert payload["ClosePositionOrder"] == 0
+    assert result.status == OrderStatus.FILLED
+    print("test_rest_client_margin_buy_to_close_builds_correct_payload: OK")
+
+
+def test_rest_client_margin_config_is_customizable():
+    """MarginConfigをカスタマイズすると、そのとおりのペイロードが送られることを確認する。"""
+    session = MagicMock()
+    session.post.side_effect = [
+        _mock_response(200, {"Token": "TOKEN123"}),
+        _mock_response(200, {"Result": 0, "OrderId": "M-ORDER-005"}),
+    ]
+    session.get.return_value = _mock_response(200, [
+        {"ID": "M-ORDER-005", "State": 5, "CumQty": 100.0, "Details": [{"Price": 500.0, "Qty": 100.0}]}
+    ])
+    margin_config = MarginConfig(margin_trade_type=1, exchange=1, close_position_order=3)
+    client = RestClient(
+        base_url="http://localhost:18080/kabusapi", api_password="pass",
+        margin_config=margin_config, session=session,
+    )
+    client.place_margin_sell_to_close("9433", 100)
+
+    payload = session.post.call_args_list[1].kwargs["json"]
+    assert payload["MarginTradeType"] == 1  # 制度信用に変更
+    assert payload["Exchange"] == 1
+    assert payload["ClosePositionOrder"] == 3
+    print("test_rest_client_margin_config_is_customizable: OK")
+
+
 if __name__ == "__main__":
     test_rate_limiter_allows_up_to_max_calls_without_waiting()
     test_rate_limiter_waits_when_exceeding_max_calls()
@@ -413,4 +525,9 @@ if __name__ == "__main__":
     test_rest_client_confirm_fill_returns_failed_when_order_ends_without_fill()
     test_rest_client_confirm_fill_returns_pending_on_timeout()
     test_rest_client_extract_filled_price_weighted_average()
+    test_rest_client_margin_buy_to_open_builds_correct_payload()
+    test_rest_client_margin_sell_to_open_builds_correct_payload()
+    test_rest_client_margin_sell_to_close_builds_correct_payload()
+    test_rest_client_margin_buy_to_close_builds_correct_payload()
+    test_rest_client_margin_config_is_customizable()
     print("\nすべてのテストに成功しました。")

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backtest import BacktestConfig, BacktestEngine, group_bars_by_timestamp, load_bars_from_csv, resample_bars  # noqa: E402
 from backtest.models import Bar  # noqa: E402
-from trading import OrderReason  # noqa: E402
+from trading import OrderReason, PositionDirection  # noqa: E402
 
 
 # ----------------------------------------------------------------------
@@ -397,6 +397,58 @@ def test_backtest_engine_reentry_cooldown_disabled_allows_immediate_reentry():
     print("test_backtest_engine_reentry_cooldown_disabled_allows_immediate_reentry: OK")
 
 
+def test_backtest_engine_short_entry_and_signal_exit():
+    """売り（SHORT）側のentry_rule_short/exit_rule_shortがバックテストで機能することを確認する。"""
+    config = BacktestConfig(
+        indicator_config={"rsi3": {"type": "rsi", "period": 3}},
+        entry_rule={"operator": "AND", "conditions": []},  # 買い側は使わない
+        exit_rule={"operator": "AND", "conditions": []},
+        entry_rule_short={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": ">", "value": 80}]},
+        exit_rule_short={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": "<", "value": 40}]},
+        daily_profit_target=1_000_000,
+        daily_max_loss=1_000_000,
+        force_close_time=time(23, 59),
+    )
+    engine = BacktestEngine(config)
+
+    base_dt = datetime(2026, 7, 28, 9, 0)
+    # 上昇してRSI3>80でSHORTエントリー(110) → 下落してRSI3<40で決済(95)。値下がりなので利益
+    prices = [100, 101, 102, 110, 95, 80]
+    bars = _make_bars("9432", prices, base_dt)
+
+    result = engine.run(bars)
+    assert result.trade_count == 1
+    trade = result.trades[0]
+    assert trade.direction == PositionDirection.SHORT
+    assert trade.entry_price == 110
+    assert trade.exit_price == 95
+    assert trade.realized_pnl > 0  # 値下がりなので利益のはず
+    print("test_backtest_engine_short_entry_and_signal_exit: OK", trade)
+
+
+def test_backtest_engine_long_and_short_are_mutually_exclusive_per_symbol():
+    """同一銘柄では買いと売りが同時に成立しても、片方（買い優先）しかエントリーしないことを確認する。"""
+    config = BacktestConfig(
+        indicator_config={"rsi3": {"type": "rsi", "period": 3}},
+        entry_rule={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": ">=", "value": 0}]},
+        exit_rule={"operator": "AND", "conditions": []},
+        entry_rule_short={"operator": "AND", "conditions": [{"indicator": "rsi3", "field": "rsi3", "op": ">=", "value": 0}]},
+        exit_rule_short={"operator": "AND", "conditions": []},
+        daily_profit_target=1_000_000,
+        daily_max_loss=1_000_000,
+        force_close_time=time(23, 59),
+    )
+    engine = BacktestEngine(config)
+    base_dt = datetime(2026, 7, 28, 9, 0)
+    prices = [100, 101, 102, 103]
+    bars = _make_bars("9432", prices, base_dt)
+
+    result = engine.run(bars)
+    # 買い・売り両方の条件が常に真だが、同一銘柄では1ポジションしか持てないはず
+    assert result.trade_count <= 1
+    print("test_backtest_engine_long_and_short_are_mutually_exclusive_per_symbol: OK", result.trade_count)
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -417,4 +469,6 @@ if __name__ == "__main__":
     test_write_backtest_log_csv_outputs_readable_file()
     test_backtest_engine_reentry_cooldown_blocks_immediate_reentry()
     test_backtest_engine_reentry_cooldown_disabled_allows_immediate_reentry()
+    test_backtest_engine_short_entry_and_signal_exit()
+    test_backtest_engine_long_and_short_are_mutually_exclusive_per_symbol()
     print("\nすべてのテストに成功しました。")

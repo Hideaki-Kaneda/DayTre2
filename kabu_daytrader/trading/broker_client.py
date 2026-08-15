@@ -21,11 +21,27 @@ class BrokerClient(Protocol):
         ...
 
     def place_market_buy(self, symbol: str, qty: int) -> OrderResult:
-        """成行買い注文を発注する。"""
+        """成行買い注文を発注する（現物）。"""
         ...
 
     def place_market_sell(self, symbol: str, qty: int) -> OrderResult:
-        """成行売り注文を発注する。"""
+        """成行売り注文を発注する（現物）。"""
+        ...
+
+    def place_margin_buy_to_open(self, symbol: str, qty: int) -> OrderResult:
+        """信用新規買い（買い建て）。"""
+        ...
+
+    def place_margin_sell_to_open(self, symbol: str, qty: int) -> OrderResult:
+        """信用新規売り（売り建て＝空売り）。"""
+        ...
+
+    def place_margin_sell_to_close(self, symbol: str, qty: int) -> OrderResult:
+        """買い建て玉の返済（反対売買の売り）。"""
+        ...
+
+    def place_margin_buy_to_close(self, symbol: str, qty: int) -> OrderResult:
+        """売り建て玉の返済（反対売買の買い）。"""
         ...
 
 
@@ -113,3 +129,55 @@ class SimulatedBrokerClient:
             qty=qty, status=OrderStatus.FILLED, reason=OrderReason.SIGNAL,
             requested_at=now, filled_at=now, filled_price=price,
         )
+
+    # ------------------------------------------------------------------
+    # 信用取引（新規売り＝空売り含む）のシミュレーション
+    # ------------------------------------------------------------------
+    def _fill_margin(self, symbol: str, qty: int, side, is_open: bool) -> OrderResult:
+        from .models import OrderReason, OrderStatus
+
+        now = self._now()
+        price = self._prices.get(symbol)
+        if price is None:
+            return OrderResult(
+                order_id=self._issue_order_id(), symbol=symbol, side=side,
+                qty=qty, status=OrderStatus.FAILED, reason=OrderReason.SIGNAL,
+                requested_at=now, error_message=f"価格情報がありません: {symbol}",
+            )
+
+        cost = price * qty
+        if is_open and cost > self.buying_power:
+            return OrderResult(
+                order_id=self._issue_order_id(), symbol=symbol, side=side,
+                qty=qty, status=OrderStatus.FAILED, reason=OrderReason.SIGNAL,
+                requested_at=now, error_message="余力不足",
+            )
+
+        # 簡易シミュレーションのため、新規建て時に余力を確保し決済時に解放する
+        # （信用取引の証拠金計算の精密なシミュレーションは行わない）
+        if is_open:
+            self.buying_power -= cost
+        else:
+            self.buying_power += cost
+
+        return OrderResult(
+            order_id=self._issue_order_id(), symbol=symbol, side=side,
+            qty=qty, status=OrderStatus.FILLED, reason=OrderReason.SIGNAL,
+            requested_at=now, filled_at=now, filled_price=price,
+        )
+
+    def place_margin_buy_to_open(self, symbol: str, qty: int) -> OrderResult:
+        from .models import OrderSide
+        return self._fill_margin(symbol, qty, OrderSide.BUY, is_open=True)
+
+    def place_margin_sell_to_open(self, symbol: str, qty: int) -> OrderResult:
+        from .models import OrderSide
+        return self._fill_margin(symbol, qty, OrderSide.SELL, is_open=True)
+
+    def place_margin_sell_to_close(self, symbol: str, qty: int) -> OrderResult:
+        from .models import OrderSide
+        return self._fill_margin(symbol, qty, OrderSide.SELL, is_open=False)
+
+    def place_margin_buy_to_close(self, symbol: str, qty: int) -> OrderResult:
+        from .models import OrderSide
+        return self._fill_margin(symbol, qty, OrderSide.BUY, is_open=False)

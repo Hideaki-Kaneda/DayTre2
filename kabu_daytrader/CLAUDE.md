@@ -262,11 +262,12 @@ kabu_daytrader/
 - 関連する既存テスト（`test_indicators.py`は全面書き換え、`test_signal_engine.py`・`test_backtest.py`・`test_trading_controller.py`の旧指標参照箇所を新指標ベースに置き換え）。全テストパス
 
 **未実装・次のステップ**：
-1. **売り（空売り）側のentry_rule/exit_ruleが未実装**：`SignalEngine`は現状entry_rule/exit_ruleを1組しか持てない設計のため、買い/売りそれぞれ独立したルール（entry_rule_long/entry_rule_short/exit_rule_long/exit_rule_short）を持てるよう拡張が必要
-2. **信用取引（買い・売りとも）への対応が未実装**：`trading.Position`は方向（LONG/SHORT）を持たない設計。`api.RestClient`にも信用新規売り・信用返済買い等のメソッドが無い（`candle_strategy`パッケージには信用取引対応のブローカーインターフェースを実装済みだが、そちらは別戦略用に完全に独立させているため、この第一戦略にはまだ流用していない）
-3. **新しい損切ロジック（固定値ラチケット式ストップ）が未実装**：既存の`RiskManager.trailing_multiplier`（AR×倍率のトレール決済）はAR指標の削除により実質無効化された状態のまま。新しい固定値（45円/20円、設定項目）でのラチェット式ストップロスに置き換える実装がまだ
+1. ~~売り（空売り）側のentry_rule/exit_ruleが未実装~~ → **実装完了**：`SignalEngine`に`entry_rule_short`/`exit_rule_short`（省略時は「常にFalse」で後方互換）を追加し、`evaluate_entry_short()`/`evaluate_exit_short()`を新設。`BacktestEngine`・`TradingController`とも買い/売り両方向を毎バー評価し、同一銘柄では買いを優先しつつ排他的にエントリーする（両方の条件が同時に成立しても一方しか約定しない）。`default_config.json`/`example_rules.json`に実際の新規売り・利確売り条件（ユーザー確定仕様）を反映済み
+2. ~~信用取引（買い・売りとも）への対応が未実装~~ → **実装完了**：`trading.PositionDirection`（LONG/SHORT）を新設し、`Position`/`ClosedPositionResult`が方向を持つようになった（`PositionManager.close_position()`はSHORTなら値下がりが利益になるよう損益計算を反転）。`trading.BrokerClient` Protocolに`place_margin_buy_to_open`/`place_margin_sell_to_open`/`place_margin_sell_to_close`/`place_margin_buy_to_close`の4メソッドを追加し、`SimulatedBrokerClient`にも実装。`OrderExecutor.try_entry()`は`direction`引数で買い建て/売り建てを切り替え、`try_exit()`は保有ポジションの`direction`を見て自動的に反対売買（信用返済）を選ぶ。`api.RestClient`は既にこれら4メソッドを実装済みのため、`BrokerClient` Protocolをそのまま満たす（テストで確認済み）。**これで第一戦略は買い・売りとも信用取引のみで動作する**（現物の`place_market_buy/sell`はもう呼ばれない）
+   - **【要確認・未検証のまま】**`MarginConfig.margin_trade_type`（既定3=一般信用デイトレ）・`close_position_order`（既定0）は実機での確認が必要（前回までの記載のとおり、変更なし）
+3. **新しい損切ロジック（固定値ラチェット式ストップ）が未実装**：既存の`RiskManager.trailing_multiplier`（AR×倍率のトレール決済）はAR指標の削除により実質無効化された状態のまま。新しい固定値（45円/20円、設定項目）でのラチェット式ストップロスに置き換える実装がまだ。**次の作業はここから**
 4. **足の間隔を5分に変更する設定はdefault_config.jsonの`bar_interval_minutes`のみ更新済み**。GUI側の動作確認・実機での5分足運用確認はまだ
-5. 上記1〜3が未完了のため、**現状のentry_rule/exit_ruleは「新規買い・利確買い」の条件のみが動作する状態**（新規売りは発火しない設定になっている）。実運用前に必ず2〜3の実装完了を待つこと
+5. 上記3が未完了のため、**現状は決済がシグナル（exit_rule/exit_rule_short）のみに依存**しており、損切なしで運用すると想定より大きな損失が出うる状態。**実運用前に必ず3の実装完了を待つこと**
 
 ## コーディング規約
 

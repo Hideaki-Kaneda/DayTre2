@@ -14,6 +14,7 @@ from trading import (  # noqa: E402
     OrderExecutor,
     OrderReason,
     OrderStatus,
+    PositionDirection,
     PositionManager,
     RiskManager,
     SimulatedBrokerClient,
@@ -138,8 +139,8 @@ def test_order_executor_rank_order_stops_when_funds_exhausted():
     rm.start_new_trading_day(date(2026, 7, 28))
     executor = OrderExecutor(broker, pm, rm, shares_per_symbol=100)
 
-    candidates = [("A", 150.0), ("B", 150.0), ("C", 150.0), ("D", 150.0)]
-    for symbol, price in candidates:
+    candidates = [("A", 150.0, PositionDirection.LONG), ("B", 150.0, PositionDirection.LONG), ("C", 150.0, PositionDirection.LONG), ("D", 150.0, PositionDirection.LONG)]
+    for symbol, price, _direction in candidates:
         broker.set_current_price(symbol, price)
 
     results = executor.try_entries_in_rank_order(candidates, now=SAFE_ENTRY_TIME)
@@ -161,8 +162,8 @@ def test_order_executor_rank_order_skips_existing_position():
 
     pm.open_position("A", 100, 150.0, "ORD-EXISTING", datetime(2026, 7, 28, 9, 0))
 
-    candidates = [("A", 150.0), ("B", 150.0)]
-    for symbol, price in candidates:
+    candidates = [("A", 150.0, PositionDirection.LONG), ("B", 150.0, PositionDirection.LONG)]
+    for symbol, price, _direction in candidates:
         broker.set_current_price(symbol, price)
 
     results = executor.try_entries_in_rank_order(candidates, now=SAFE_ENTRY_TIME)
@@ -335,8 +336,8 @@ def test_order_executor_rank_order_blocked_before_entry_start_time():
     rm.start_new_trading_day(date(2026, 7, 28))
     executor = OrderExecutor(broker, pm, rm, shares_per_symbol=100)
 
-    candidates = [("A", 100.0), ("B", 100.0)]
-    for symbol, price in candidates:
+    candidates = [("A", 100.0, PositionDirection.LONG), ("B", 100.0, PositionDirection.LONG)]
+    for symbol, price, _direction in candidates:
         broker.set_current_price(symbol, price)
 
     too_early = datetime(2026, 7, 28, 9, 0)
@@ -476,13 +477,130 @@ def test_order_executor_rank_order_skips_symbol_in_cooldown():
     executor = OrderExecutor(broker, pm, rm, shares_per_symbol=100)
     rm.record_exit("A")  # Aだけクールダウン中とみなす
 
-    candidates = [("A", 100.0), ("B", 100.0)]
-    for symbol, price in candidates:
+    candidates = [("A", 100.0, PositionDirection.LONG), ("B", 100.0, PositionDirection.LONG)]
+    for symbol, price, _direction in candidates:
         broker.set_current_price(symbol, price)
 
     results = executor.try_entries_in_rank_order(candidates, now=SAFE_ENTRY_TIME)
     assert [r.symbol for r in results] == ["B"]
     print("test_order_executor_rank_order_skips_symbol_in_cooldown: OK")
+
+
+def test_position_manager_short_position_pnl_is_profitable_on_price_decline():
+    """売り建て（SHORT）は値下がりが利益になることを確認する。"""
+    pm = PositionManager()
+    pm.open_position(
+        "9432", qty=100, entry_price=1000.0, entry_order_id="ORD-1",
+        entry_at=SAFE_ENTRY_TIME, direction=PositionDirection.SHORT,
+    )
+    assert pm.get_position("9432").direction == PositionDirection.SHORT
+
+    closed = pm.close_position("9432", exit_price=950.0, exit_at=SAFE_ENTRY_TIME, reason=OrderReason.SIGNAL)
+    assert closed.realized_pnl == (1000.0 - 950.0) * 100  # 値下がりなので利益
+    assert closed.direction == PositionDirection.SHORT
+    print("test_position_manager_short_position_pnl_is_profitable_on_price_decline: OK", closed.realized_pnl)
+
+
+def test_position_manager_short_position_pnl_is_loss_on_price_rise():
+    """売り建て（SHORT）は値上がりが損失になることを確認する。"""
+    pm = PositionManager()
+    pm.open_position(
+        "9432", qty=100, entry_price=1000.0, entry_order_id="ORD-1",
+        entry_at=SAFE_ENTRY_TIME, direction=PositionDirection.SHORT,
+    )
+    closed = pm.close_position("9432", exit_price=1050.0, exit_at=SAFE_ENTRY_TIME, reason=OrderReason.SIGNAL)
+    assert closed.realized_pnl == (1000.0 - 1050.0) * 100  # 値上がりなので損失（マイナス）
+    assert closed.realized_pnl < 0
+    print("test_position_manager_short_position_pnl_is_loss_on_price_rise: OK", closed.realized_pnl)
+
+
+def test_position_manager_open_position_defaults_to_long():
+    """direction未指定時は既存挙動どおりLONGになることを確認する（後方互換）。"""
+    pm = PositionManager()
+    pm.open_position("9432", qty=100, entry_price=1000.0, entry_order_id="ORD-1", entry_at=SAFE_ENTRY_TIME)
+    assert pm.get_position("9432").direction == PositionDirection.LONG
+    print("test_position_manager_open_position_defaults_to_long: OK")
+
+
+def test_simulated_broker_margin_sell_to_open_and_buy_to_close():
+    """SimulatedBrokerClientの信用新規売り→信用返済買い（空売りの一連の流れ）が動作することを確認する。"""
+    broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
+    broker.set_current_price("9432", 1000.0)
+
+    open_result = broker.place_margin_sell_to_open("9432", 100)
+    assert open_result.status == OrderStatus.FILLED
+    assert open_result.filled_price == 1000.0
+
+    broker.set_current_price("9432", 950.0)
+    close_result = broker.place_margin_buy_to_close("9432", 100)
+    assert close_result.status == OrderStatus.FILLED
+    assert close_result.filled_price == 950.0
+    print("test_simulated_broker_margin_sell_to_open_and_buy_to_close: OK")
+
+
+def test_simulated_broker_margin_buy_to_open_and_sell_to_close():
+    broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
+    broker.set_current_price("9432", 1000.0)
+
+    open_result = broker.place_margin_buy_to_open("9432", 100)
+    assert open_result.status == OrderStatus.FILLED
+
+    broker.set_current_price("9432", 1050.0)
+    close_result = broker.place_margin_sell_to_close("9432", 100)
+    assert close_result.status == OrderStatus.FILLED
+    assert close_result.filled_price == 1050.0
+    print("test_simulated_broker_margin_buy_to_open_and_sell_to_close: OK")
+
+
+def test_simulated_broker_margin_open_fails_when_insufficient_funds():
+    broker = SimulatedBrokerClient(initial_buying_power=100.0)
+    broker.set_current_price("9432", 1000.0)
+    result = broker.place_margin_buy_to_open("9432", 100)
+    assert result.status == OrderStatus.FAILED
+    print("test_simulated_broker_margin_open_fails_when_insufficient_funds: OK")
+
+
+def test_order_executor_short_entry_and_exit_via_margin_methods():
+    """
+    SHORT方向のエントリー・決済が信用取引メソッド
+    （place_margin_sell_to_open / place_margin_buy_to_close）を正しく使うことを確認する。
+    """
+    broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
+    pm = PositionManager()
+    rm = RiskManager()
+    rm.start_new_trading_day(date(2026, 7, 28))
+    executor = OrderExecutor(broker, pm, rm, shares_per_symbol=100)
+
+    broker.set_current_price("9432", 1000.0)
+    entry_result = executor.try_entry("9432", 1000.0, now=SAFE_ENTRY_TIME, direction=PositionDirection.SHORT)
+    assert entry_result.status == OrderStatus.FILLED
+    position = pm.get_position("9432")
+    assert position.direction == PositionDirection.SHORT
+
+    # 値下がりが利益になることを確認しつつ決済
+    broker.set_current_price("9432", 950.0)
+    exit_result = executor.try_exit("9432", 950.0, OrderReason.SIGNAL)
+    assert exit_result.status == OrderStatus.FILLED
+    assert pm.has_position("9432") is False
+    print("test_order_executor_short_entry_and_exit_via_margin_methods: OK")
+
+
+def test_order_executor_rank_order_supports_mixed_long_and_short_directions():
+    broker = SimulatedBrokerClient(initial_buying_power=1_000_000)
+    pm = PositionManager()
+    rm = RiskManager()
+    rm.start_new_trading_day(date(2026, 7, 28))
+    executor = OrderExecutor(broker, pm, rm, shares_per_symbol=100)
+
+    broker.set_current_price("A", 100.0)
+    broker.set_current_price("B", 100.0)
+    candidates = [("A", 100.0, PositionDirection.LONG), ("B", 100.0, PositionDirection.SHORT)]
+
+    results = executor.try_entries_in_rank_order(candidates, now=SAFE_ENTRY_TIME)
+    assert len(results) == 2
+    assert pm.get_position("A").direction == PositionDirection.LONG
+    assert pm.get_position("B").direction == PositionDirection.SHORT
+    print("test_order_executor_rank_order_supports_mixed_long_and_short_directions: OK")
 
 
 if __name__ == "__main__":
@@ -511,4 +629,12 @@ if __name__ == "__main__":
     test_risk_manager_reentry_cooldown_resets_on_new_trading_day()
     test_order_executor_blocks_reentry_during_cooldown_after_exit()
     test_order_executor_rank_order_skips_symbol_in_cooldown()
+    test_position_manager_short_position_pnl_is_profitable_on_price_decline()
+    test_position_manager_short_position_pnl_is_loss_on_price_rise()
+    test_position_manager_open_position_defaults_to_long()
+    test_simulated_broker_margin_sell_to_open_and_buy_to_close()
+    test_simulated_broker_margin_buy_to_open_and_sell_to_close()
+    test_simulated_broker_margin_open_fails_when_insufficient_funds()
+    test_order_executor_short_entry_and_exit_via_margin_methods()
+    test_order_executor_rank_order_supports_mixed_long_and_short_directions()
     print("\nすべてのテストに成功しました。")

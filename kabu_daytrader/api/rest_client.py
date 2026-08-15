@@ -77,12 +77,57 @@ class AccountConfig:
     front_order_type: int = 10  # 10 = 成行
 
 
+@dataclass
+class MarginConfig:
+    """
+    信用取引（新規売り＝空売り含む）の発注に必要な設定値。
+
+    参考: https://note.com/note_20260215/n/n6e4a2f905401
+    （kabuステーションAPIでの信用取引発注パラメータの解説記事）
+
+    信用新規（買い建て・売り建てとも）:
+        CashMargin: 2
+        DelivType : 0（指定なし）
+        FundType  : "11"（省略可。省略時は自動的に"11"がセットされる）
+        Exchange  : 通常時は東証"1"では新規発注できないため、東証+"27"を使う
+    信用返済（買い建て・売り建てとも、反対売買で決済）:
+        CashMargin: 3
+        DelivType : 2（お預り金。要確認）
+        FundType  : "11"（省略可）
+        Exchange  : 返済対象の建玉を保有している市場に合わせる。
+                    新規を東証+"27"で発注しているため、返済も"27"に揃える
+        ClosePositionOrder: 決済順序を指定して建玉を自動選択する方式（0〜7）。
+                    本実装では建玉ID（HoldID）を個別管理せず、この方式を使う
+                    （HoldIDを使う場合はClosePositionsを使うが、
+                    そちらは建玉一覧の取得・追跡が別途必要になるため未対応）。
+
+    【重要・要確認】
+    - margin_trade_type（制度信用/一般信用(長期)/一般信用(デイトレ)）は、
+      実際の口座の信用取引区分設定に合わせて必ず確認すること。
+      既定値は一般信用（デイトレ）＝3としているが、口座によっては
+      制度信用（1）や一般信用・長期（2）が正しい場合がある。
+    - close_position_orderの各値（0〜7）が具体的にどの決済順序を意味するかは
+      公式リファレンスで確認できておらず、既定値0が意図した挙動になるかは未検証。
+      実際に返済注文を送る前に、少額での実地確認を強く推奨する。
+    - exchangeは東証+"27"を既定にしているが、実際の口座・銘柄で
+      新規発注が通るか、返済時に建玉と市場が一致するか確認すること。
+    """
+
+    margin_trade_type: int = 3  # 1=制度信用 2=一般信用(長期) 3=一般信用(デイトレ)。要確認
+    exchange: int = 27  # 東証+。新規発注では東証"1"は使用不可
+    close_position_order: int = 0  # 決済順序指定（0〜7）。各値の意味は要確認
+    fund_type: str = "11"  # 信用取引のFundType（省略可だが明示的に設定する）
+    open_deliv_type: int = 0  # 信用新規のDelivType
+    close_deliv_type: int = 2  # 信用返済のDelivType（お預り金。要確認）
+
+
 class RestClient:
     def __init__(
         self,
         base_url: str,
         api_password: str,
         account_config: Optional[AccountConfig] = None,
+        margin_config: Optional[MarginConfig] = None,
         session: Optional[requests.Session] = None,
         sleep_func: Optional[Any] = None,
     ):
@@ -97,6 +142,7 @@ class RestClient:
         self.base_url = base_url.rstrip("/")
         self.api_password = api_password
         self.account_config = account_config or AccountConfig()
+        self.margin_config = margin_config or MarginConfig()
         self.session = session or requests.Session()
 
         import time as _time_module
@@ -213,6 +259,89 @@ class RestClient:
 
     def place_market_sell(self, symbol: str, qty: int) -> OrderResult:
         return self._send_market_order(symbol, qty, side="1")  # "1" = 売
+
+    # ------------------------------------------------------------------
+    # 信用取引（新規売り＝空売り含む）
+    # 参考: https://note.com/note_20260215/n/n6e4a2f905401
+    # ------------------------------------------------------------------
+    def place_margin_buy_to_open(self, symbol: str, qty: int) -> OrderResult:
+        """信用新規買い（買い建て）。"""
+        return self._send_margin_order(symbol, qty, side="2", is_open=True)
+
+    def place_margin_sell_to_open(self, symbol: str, qty: int) -> OrderResult:
+        """信用新規売り（売り建て＝空売り）。"""
+        return self._send_margin_order(symbol, qty, side="1", is_open=True)
+
+    def place_margin_sell_to_close(self, symbol: str, qty: int) -> OrderResult:
+        """買い建て玉の返済（反対売買の売り）。"""
+        return self._send_margin_order(symbol, qty, side="1", is_open=False)
+
+    def place_margin_buy_to_close(self, symbol: str, qty: int) -> OrderResult:
+        """売り建て玉の返済（反対売買の買い）。"""
+        return self._send_margin_order(symbol, qty, side="2", is_open=False)
+
+    def _send_margin_order(self, symbol: str, qty: int, side: str, is_open: bool) -> OrderResult:
+        """
+        信用取引の新規・返済を成行で発注する。
+
+        【要確認】margin_trade_type・close_position_order・exchangeはいずれも
+        MarginConfigのdocstringに記載のとおり実機での確認が必要な想定値。
+        実際に発注する前に、必ず少額でご自身の口座設定と突き合わせて確認すること。
+        """
+        now = datetime.now()
+        side_enum = OrderSide.BUY if side == "2" else OrderSide.SELL
+
+        self._order_rate_limiter.acquire()
+        acfg = self.account_config
+        mcfg = self.margin_config
+
+        payload: Dict[str, Any] = {
+            "Password": acfg.order_password,
+            "Symbol": symbol,
+            "Exchange": mcfg.exchange,
+            "SecurityType": acfg.security_type,
+            "Side": side,
+            "CashMargin": 2 if is_open else 3,  # 2=信用新規 3=信用返済
+            "MarginTradeType": mcfg.margin_trade_type,
+            "DelivType": mcfg.open_deliv_type if is_open else mcfg.close_deliv_type,
+            "FundType": mcfg.fund_type,
+            "AccountType": acfg.account_type,
+            "Qty": qty,
+            "FrontOrderType": acfg.front_order_type,  # 成行
+            "Price": 0,  # 成行のため0
+            "ExpireDay": 0,
+        }
+        if not is_open:
+            # 返済：建玉IDを個別指定せず、決済順序を指定して自動選択する方式を使う
+            # （ClosePositionOrderとClosePositionsはどちらか一方のみ指定すること）
+            payload["ClosePositionOrder"] = mcfg.close_position_order
+
+        url = f"{self.base_url}/sendorder"
+        try:
+            resp = self.session.post(url, json=payload, headers=self._headers(), timeout=5)
+            body = self._parse_response(resp)
+        except KabuApiError as e:
+            logger.error(
+                "信用発注失敗: symbol=%s side=%s is_open=%s error=%s", symbol, side, is_open, e
+            )
+            return OrderResult(
+                order_id="", symbol=symbol, side=side_enum, qty=qty,
+                status=OrderStatus.FAILED, reason=OrderReason.SIGNAL,
+                requested_at=now, error_message=str(e),
+            )
+        except requests.RequestException as e:
+            logger.error(
+                "信用発注リクエストで通信エラー: symbol=%s side=%s is_open=%s error=%s",
+                symbol, side, is_open, e,
+            )
+            return OrderResult(
+                order_id="", symbol=symbol, side=side_enum, qty=qty,
+                status=OrderStatus.FAILED, reason=OrderReason.SIGNAL,
+                requested_at=now, error_message=str(e),
+            )
+
+        order_id = str(body.get("OrderId", ""))
+        return self._confirm_fill(order_id, symbol, qty, side_enum, now)
 
     def _send_market_order(self, symbol: str, qty: int, side: str) -> OrderResult:
         now = datetime.now()
